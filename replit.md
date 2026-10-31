@@ -33,7 +33,7 @@ A product studio for designing apparel, packaging and PPF-film-wrapped objects, 
 - Cut plans are generated in the browser and saved to the project as JSON (`plan`, `planStats`); the server never computes geometry.
 - Imported 3D model files live only in the browser's IndexedDB — a project with an imported model opened on another browser asks to re-import the file.
 - Plan units are mm, y-down. 3D scene is metres (box/garment scaled 0.001; PPF root scaled mmPerUnit/1000).
-- "RTX" look = WebGL path tracing (starts after 400 ms camera idle) over a raster preview; AgX tone mapping, procedural HDR environments.
+- "RTX" look = WebGL path tracing (starts after 400 ms camera idle) over a raster preview; PBR Neutral tone mapping (keeps dye/ink colours true; AgX turned saturated reds pink), procedural HDR environments. Dyed tintable fabrics take their sheen colour from the dye.
 - PPF template ids: `imported` for user files, `sample:<id>` for built-in sample shapes.
 - Print artwork (apparel): layers saved in `project.parameters.artwork`, kept out of the drafting params in the studio so moving a print never re-drafts the pattern. Coordinates are the panel drafting frame (mm; T-shirt x=0 centre, y from HPS). One layer set drives the design board, the 3D overlay textures (redrawn in place) and SVG/PDF exports (DXF has no artwork). Prints are never mirrored.
 - Uploaded print images go to App Storage; uploading requires Clerk sign-in, everything else (projects, viewing) stays public. Objects are served same-origin via `/api/storage/objects/*` so canvases stay untainted.
@@ -41,6 +41,7 @@ A product studio for designing apparel, packaging and PPF-film-wrapped objects, 
 ## Product
 
 - Odevy: parametric T-shirt, hoodie, trousers, skirt, tote; sizes XS–XXL, seam/hem allowances, nesting on fabric width.
+- 3D tops (T-shirt, hoodie) are built from the drafted pattern itself (`engine/garmentMesh.ts`, cdt2d): front/back pieces + sleeves sewn into the armholes form one flat silhouette, meshed and inflated into front/back layers that meet at closed seams. Silhouette = cut plan; sleeves are part of the body surface. Trousers/skirt/tote still use ring tubes.
 - Obaly: FEFCO 0201, ECMA tuck-end, FEFCO 0427 mailer, FEFCO 0300 tray with live 3D folding.
 - PPF: import STEP/IGES/STL/OBJ/PLY/3MF/GLB/FBX/DAE/USDZ/BREP (auto-detected), split into film pieces by max angle, flatten with stretch report, nest on roll.
 - Exports SVG, DXF, PDF (1:1), JSON; PNG snapshot of the 3D view.

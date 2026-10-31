@@ -265,7 +265,9 @@ export class Viewer {
       throw new Error('Tento prehliadač alebo zariadenie nepodporuje WebGL, preto 3D náhľad nie je dostupný. Strih a exporty fungujú aj bez neho.');
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.toneMapping = THREE.AgXToneMapping;
+    // PBR Neutral keeps base colours (fabric dyes, print inks) true to the chosen swatch;
+    // AgX visibly desaturated strong reds into pink
+    renderer.toneMapping = THREE.NeutralToneMapping;
     renderer.toneMappingExposure = 1;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.shadowMap.enabled = true;

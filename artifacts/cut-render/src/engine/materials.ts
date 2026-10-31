@@ -400,7 +400,10 @@ export function createPhysicalMaterial(
   if (ph.sheen !== undefined) {
     mat.sheen = ph.sheen;
     mat.sheenRoughness = ph.sheenRoughness ?? 0.5;
-    mat.sheenColor = new THREE.Color(ph.sheenColor ?? color);
+    // a fixed (usually near-white) preset sheen would wash out a custom colour into a pastel:
+    // when the fabric is dyed, the sheen takes the dye colour, only slightly lighter
+    const dyed = p.tintable && !!colorOverride;
+    mat.sheenColor = dyed ? new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.15) : new THREE.Color(ph.sheenColor ?? color);
   }
   if (ph.clearcoat !== undefined) {
     mat.clearcoat = ph.clearcoat;

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { CutPlan, PlanLabel, PlanPath, PlanPiece, Point } from './types';
 import { bezier, boundsOf, centroid, mirrorX, pieceColor, polygonArea, polylineLength, rotatePoints, translatePoints } from './geom';
 import { createPhysicalMaterial } from './materials';
+import { distToSegs, meshRegion, pointInPolygon, roundProfile, segsOf, smoothstep, type RegionMesh } from './garmentMesh';
 import { createInkMaterial, createPanelTexture, type ArtworkLayer, type PanelId, type PanelTexture, type PrintPanel } from './artwork';
 
 export type GarmentId = 'tshirt' | 'hoodie' | 'trousers' | 'skirt' | 'tote';
@@ -997,24 +998,6 @@ function ellipseFromCirc(circMm: number, aspect = 1.45): [number, number] {
   return [a, a / aspect];
 }
 
-function sleeveRings(start: THREE.Vector3, dir: THREE.Vector3, length: number, r0: number, r1: number, fold: number, cuff: number): Ring[] {
-  const u = Z.clone();
-  const v = new THREE.Vector3().crossVectors(dir, u).normalize();
-  const rings: Ring[] = [];
-  const n = 6;
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const r = r0 + (r1 - r0) * t;
-    rings.push({ c: start.clone().addScaledVector(dir, length * t), u, v, a: r * 0.92, b: r * 1.05, fold: fold * (0.4 + t) });
-  }
-  if (cuff > 0) {
-    const end = start.clone().addScaledVector(dir, length);
-    rings.push({ c: end.clone().addScaledVector(dir, 0.004), u, v, a: r1 * 0.75, b: r1 * 0.85, fold: 0 });
-    rings.push({ c: end.clone().addScaledVector(dir, cuff), u, v, a: r1 * 0.72, b: r1 * 0.8, fold: 0 });
-  }
-  return rings;
-}
-
 function addMesh(group: THREE.Group, geo: THREE.BufferGeometry, mat: THREE.Material) {
   const m = new THREE.Mesh(geo, mat);
   m.castShadow = true;
@@ -1023,122 +1006,404 @@ function addMesh(group: THREE.Group, geo: THREE.BufferGeometry, mat: THREE.Mater
   return m;
 }
 
-function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoodie: boolean, hanger: boolean): PrintSurface[] {
-  const surfaces: PrintSurface[] = [];
+/** Print surface on a pattern-built mesh: every vertex carries its panel coordinates (mm). */
+interface MeshPrintSurface {
+  panel: PanelId;
+  geo: THREE.BufferGeometry;
+  px: Float32Array;
+  py: Float32Array;
+  /** triangles (vertex indices) that belong to this panel */
+  tris: number[];
+}
+
+const REGION_BODY = 0;
+const REGION_SLEEVE_POS = 1; // world +x: the wearer's left sleeve
+const REGION_SLEEVE_NEG = 2; // world -x: the wearer's right sleeve
+const REGION_BAND = 3;
+const REGION_CUFF = 4;
+
+/**
+ * Tops (T-shirt, hoodie) built straight from the drafted pattern: the front and back pieces
+ * with both sleeves sewn into the armholes form one flat silhouette that is meshed and lifted
+ * into a front and a back layer. Silhouette, neckline, sleeve length and hem width are exactly
+ * the ones in the cut plan, and the sleeves are part of the same surface as the body.
+ */
+function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoodie: boolean, hanger: boolean): MeshPrintSurface[] {
   const M = measures(p);
+  const hemBand = hoodie ? 60 : 0;
+  const cuffH = hoodie ? 70 : 0;
   const t = draftTop(M, {
     extraEase: hoodie ? 60 : 0,
     lengthExtra: hoodie ? 40 : 0,
     sleeve: hoodie ? 'long' : p.sleeve,
     frontNeckExtra: hoodie ? 15 : 0,
-    hemBand: hoodie ? 60 : 0,
-    cuff: hoodie ? 70 : 0,
+    hemBand,
+    cuff: cuffH,
   });
-  const L = t.dims.length / 1000;
-  const [ca, cb] = ellipseFromCirc(t.dims.chest);
-  const [wa, wb] = ellipseFromCirc(Math.max(M.m.waist + M.ease, t.dims.chest * 0.92));
-  const sh = t.dims.shoulder / 2000;
-  const ad = t.dims.armhole / 1000;
-  const neckR = M.m.neck / 1000 / (2 * Math.PI) * 1.25;
-  const looseness = M.ease / 1000;
-  const fold = 0.003 + looseness * 0.02;
-  const base = hoodie ? 0.06 : 0;
-  const rings: Ring[] = [];
-  if (hoodie) {
-    rings.push(hRing(0, wa * 0.9, wb * 0.92, 0));
-    rings.push(hRing(base - 0.004, wa * 0.92, wb * 0.95, 0));
+  const F = t.front.edges;
+  const neckF = F[0].pts;
+  const neckB = t.back.edges[0].pts;
+  const shoulderR = F[1].pts;
+  const armR = F[2].pts;
+  const sideR = F[3].pts;
+  const hemPts = F[4].pts;
+  const SP = armR[0];
+  const UP = armR[armR.length - 1];
+  const nw = shoulderR[0].x;
+  const corner = sideR[sideR.length - 1];
+  const ad = UP.y;
+  const hemY = corner.y;
+  const yBot = hemY + hemBand + 8;
+  const mirP = (q: Point): Point => ({ x: -q.x, y: q.y });
+
+  // ---- sleeve placement: half the sleeve piece (front layer), folded along its centre line ----
+  const seamS = t.sleeve.edges[1].pts;
+  const bw2 = seamS[0].x;
+  const ch = seamS[0].y;
+  const hw2 = seamS[1].x;
+  const sLen = seamS[1].y;
+  const cuffHalf = hw2 * 0.82;
+  const sEnd = sLen + cuffH;
+  // orient the sleeve so its cap chord (top -> underarm) lies along the armhole chord SP -> UP
+  const chordL = Math.hypot(UP.x - SP.x, UP.y - SP.y);
+  const ux = (UP.x - SP.x) / chordL;
+  const uy = (UP.y - SP.y) / chordL;
+  const capL = Math.hypot(bw2, ch);
+  const cosL = bw2 / capL;
+  const sinL = ch / capL;
+  let wx = uy;
+  let wy = -ux;
+  if (sinL * ux + cosL * wx < 0) {
+    wx = -wx;
+    wy = -wy;
   }
-  rings.push(
-    hRing(base, wa * 1.02, wb * 1.03, fold),
-    hRing(base + (L - base) * 0.35, wa, wb, fold * 1.2),
-    hRing(L - ad * 1.05, ca, cb, fold * 0.6),
-    hRing(L - ad * 0.45, ca * 0.98, cb * 0.95, fold * 0.3),
-    hRing(L - 0.05, sh * 0.98, cb * 0.62, 0),
-    hRing(L - 0.012, neckR * 1.45, neckR * 1.15, 0, -0.008),
-    hRing(L - 0.004, neckR * 1.05, neckR * 0.92, 0, -0.012),
-  );
-  const bodyGeo = tubeGeometry(rings, 72, 1.3);
-  addMesh(group, bodyGeo, mat);
-  // pattern y is measured down from the high shoulder point (≈ top of the tube)
-  const mapBodyY = (_row: number, pos: THREE.Vector3) => (L - pos.y) * 1000;
-  surfaces.push({ panel: 'front', geo: bodyGeo, refCol: 18, mapY: mapBodyY }, { panel: 'back', geo: bodyGeo, refCol: 54, mapY: mapBodyY });
-
-  // Neck band
-  const band = tubeGeometry([hRing(L - 0.006, neckR * 1.05, neckR * 0.92, 0, -0.012), hRing(L + 0.012, neckR * 0.98, neckR * 0.86, 0, -0.014)], 48);
-  addMesh(group, band, mat);
-
-  // Sleeves
-  const long = hoodie || p.sleeve === 'long';
-  const sleeveLen = t.dims.sleeveLen / 1000 - (hoodie ? 0.07 : 0);
-  const r0 = t.dims.bicep / 1000 / (2 * Math.PI);
-  const r1 = t.sleeveHem / 1000 / (2 * Math.PI);
-  for (const s of [-1, 1]) {
-    const ang = long ? 0.32 : 0.75;
-    const dir = V(s * Math.sin(ang), -Math.cos(ang), 0.02).normalize();
-    const start = V(s * (sh - 0.035), L - 0.07 - r0 * 0.6, 0);
-    const sg = tubeGeometry(sleeveRings(start, dir, sleeveLen, r0, r1, fold * 0.8, hoodie ? 0.07 : 0), 40, s);
-    addMesh(group, sg, mat);
-    // the wearer's left sleeve is world +x; its top (cap centre) is at θ = 3π/2, the right sleeve's at π/2
-    const dist = sg.userData.tube.dist as number[];
-    surfaces.push({ panel: s > 0 ? 'sleeveL' : 'sleeveR', geo: sg, refCol: s > 0 ? 30 : 10, mapY: (row) => dist[row] * 1000 });
-  }
-
-  if (hanger) addHanger(group, L, sh, neckR);
-
-  if (hoodie) {
-    // hood lying on the back
-    const hood = new THREE.SphereGeometry(0.15, 48, 24, Math.PI * 0.15, Math.PI * 1.7, 0, Math.PI * 0.62);
-    hood.scale(1.0, 0.85, 1.15);
-    const hm = addMesh(group, hood, mat);
-    hm.rotation.set(-1.15, Math.PI, 0);
-    hm.position.set(0, L + 0.01, -cb * 0.9);
-    // kangaroo pocket
-    const k = M.m.chest / 980;
-    const shape = new THREE.Shape();
-    const pw = 0.36 * k;
-    const ph = 0.23 * k;
-    shape.moveTo(-pw * 0.33, ph);
-    shape.lineTo(pw * 0.33, ph);
-    shape.lineTo(pw / 2, ph - 0.095 * k);
-    shape.lineTo(pw / 2, 0);
-    shape.lineTo(-pw / 2, 0);
-    shape.lineTo(-pw / 2, ph - 0.095 * k);
-    shape.closePath();
-    const pg = new THREE.ExtrudeGeometry(shape, { depth: 0.003, bevelEnabled: true, bevelThickness: 0.002, bevelSize: 0.002, bevelSegments: 2 });
-    const pocket = addMesh(group, pg, mat);
-    pocket.position.set(0, base + 0.03, wb * 1.0);
-    pocket.rotation.x = -0.05;
-    // drawcords
-    const cordMat = new THREE.MeshPhysicalMaterial({ color: 0xf5f5f0, roughness: 0.7, sheen: 1, sheenRoughness: 0.5 });
-    for (const s of [-1, 1]) {
-      const curve = new THREE.CatmullRomCurve3([V(s * 0.035, L - 0.03, neckR * 1.1), V(s * 0.04, L - 0.12, cb * 0.95), V(s * 0.045, L - 0.24, cb * 1.0)]);
-      addMesh(group, new THREE.TubeGeometry(curve, 24, 0.0035, 8), cordMat);
+  const dX = sinL * ux + cosL * wx; // along the sleeve (cap -> hem)
+  const dY = sinL * uy + cosL * wy;
+  const nX = cosL * ux - sinL * wx; // across the sleeve (fold -> underarm seam)
+  const nY = cosL * uy - sinL * wy;
+  // the cap is eased into the armhole: pull the underarm corner onto UP, fading out toward the hem
+  const eX = UP.x - (SP.x + ux * capL);
+  const eY = UP.y - (SP.y + uy * capL);
+  const ease = (yl: number) => (yl <= ch ? 1 : 1 - smoothstep(ch, sLen, yl));
+  const warp = (xl: number, yl: number): Point => {
+    const w = (xl / bw2) * ease(yl);
+    return { x: SP.x + nX * xl + dX * yl + eX * w, y: SP.y + nY * xl + dY * yl + eY * w };
+  };
+  const unwarp = (q: Point): [number, number] => {
+    let xl = (q.x - SP.x) * nX + (q.y - SP.y) * nY;
+    let yl = (q.x - SP.x) * dX + (q.y - SP.y) * dY;
+    for (let it = 0; it < 10; it++) {
+      const f = warp(xl, yl);
+      const ex = f.x - q.x;
+      const ey = f.y - q.y;
+      if (ex * ex + ey * ey < 1e-6) break;
+      const fx = warp(xl + 0.5, yl);
+      const fy = warp(xl, yl + 0.5);
+      const a = (fx.x - f.x) / 0.5;
+      const b = (fy.x - f.x) / 0.5;
+      const c = (fx.y - f.y) / 0.5;
+      const d = (fy.y - f.y) / 0.5;
+      const det = a * d - b * c || 1;
+      xl -= (d * ex - b * ey) / det;
+      yl -= (-c * ex + a * ey) / det;
     }
+    return [xl, yl];
+  };
+
+  const foldR: Point[] = cuffH ? [SP, warp(0, sLen), warp(0, sEnd)] : [SP, warp(0, sEnd)];
+  const endHalf = cuffH ? cuffHalf : hw2;
+  const endR: Point[] = [];
+  for (let i = 0; i <= 8; i++) endR.push(warp((endHalf * i) / 8, sEnd));
+  const underR: Point[] = [];
+  if (cuffH) underR.push(warp(cuffHalf, sEnd), warp(cuffHalf, sLen + 10));
+  for (let i = 0; i <= 18; i++) {
+    const k = i / 18;
+    underR.push(i === 18 ? UP : warp(hw2 + (bw2 - hw2) * k, sLen + (ch - sLen) * k));
+  }
+  const sleeveHemR: Point[] = [];
+  if (cuffH) for (let i = 0; i <= 8; i++) sleeveHemR.push(warp((hw2 * i) / 8, sLen));
+  const sleeveOut = concat(foldR, endR, underR);
+
+  const bandHalf = corner.x * 0.85;
+  const bandSideR: Point[] = [corner, { x: bandHalf, y: hemY + hemBand }];
+  const bottom: Point[] = hemBand ? [corner, { x: bandHalf, y: hemY + hemBand }, { x: 0, y: hemY + hemBand }, { x: -bandHalf, y: hemY + hemBand }, mirP(corner)] : hemPts;
+
+  const closeLoop = (pts: Point[]) => {
+    const f = pts[0];
+    const l = pts[pts.length - 1];
+    return Math.hypot(f.x - l.x, f.y - l.y) < 1e-6 ? pts.slice(0, -1) : pts;
+  };
+  const outlineFor = (neck: Point[]) =>
+    closeLoop(concat(neck, shoulderR, sleeveOut, sideR, bottom, mir(rev(sideR)), rev(sleeveOut).map(mirP), mir(rev(shoulderR))));
+  const bodyPolyFor = (neck: Point[]) => closeLoop(concat(neck, shoulderR, armR, sideR, hemPts, mir(rev(sideR)), mir(rev(armR)), mir(rev(shoulderR))));
+  const bandPoly = hemBand ? [...bottom, ...rev(hemPts).slice(1, -1)] : [];
+
+  const constraints: Point[][] = [armR, mir(rev(armR))];
+  if (hemBand) constraints.push(hemPts);
+  if (cuffH) constraints.push(sleeveHemR, mir(sleeveHemR));
+
+  // ---- depth of the two layers ----
+  const closedSegs = segsOf([
+    shoulderR, mir(shoulderR), foldR, mir(foldR), underR, mir(underR), sideR, mir(sideR),
+    ...(hemBand ? [bandSideR, mir(bandSideR)] : []),
+  ]);
+  const creaseSegs = segsOf(constraints);
+  const H = hoodie ? 34 : 28; // half depth of the body on the hanger (mm)
+  const RD = 70; // width of the rounded roll at the closed seams (mm)
+  const sleeveLocal = (q: Point): [number, number] => unwarp(q.x >= 0 ? q : mirP(q));
+  /** distance of a layer from the mid-plane, in mm (front: +z, back: -z) */
+  const depth = (q: Point, back: boolean, inBody: boolean): number => {
+    const d = distToSegs(q.x, q.y, closedSegs);
+    const ty = Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad)));
+    let z = H * (1 - 0.25 * ty) * roundProfile(d / RD);
+    z *= 1 - 0.12 * Math.exp(-((distToSegs(q.x, q.y, creaseSegs) / 7) ** 2));
+    let fold: number;
+    if (inBody) {
+      const ph = back ? 1.7 : 0;
+      const w = 0.6 * Math.sin((2 * Math.PI * q.x) / 170 + 0.8 + ph + q.y * 0.002) + 0.4 * Math.sin((2 * Math.PI * q.x) / 83 + 2.1 + ph * 1.3 + q.y * 0.004);
+      fold = w * 3.4 * (0.15 + 0.85 * smoothstep(ad * 0.7, yBot, q.y));
+    } else {
+      const [xl, yl] = sleeveLocal(q);
+      fold = Math.sin(yl / 26 + (back ? 1.1 : 0) + xl * 0.012) * 1.6 * smoothstep(ch * 0.5, sLen, yl);
+    }
+    return z + fold * FOLD_K * smoothstep(0, 45, d);
+  };
+
+  const topW = yBot + 10; // world y (mm) of the pattern origin (high shoulder point)
+  const toWorld = (q: Point, z: number) => V(q.x / 1000, (topW - q.y) / 1000, z / 1000);
+  const surfaces: MeshPrintSurface[] = [];
+
+  const makeLayer = (neck: Point[], back: boolean) => {
+    const outline = outlineFor(neck);
+    const mesh = meshRegion(outline, constraints, 10);
+    const bodyPoly = bodyPolyFor(neck);
+    const n = mesh.pts.length;
+    const pos = new Float32Array(n * 3);
+    const uv = new Float32Array(n * 2);
+    const sgn = back ? -1 : 1;
+    mesh.pts.forEach((q, i) => {
+      const z = sgn * depth(q, back, pointInPolygon(q.x, q.y, bodyPoly));
+      const v = toWorld(q, z);
+      pos[i * 3] = v.x;
+      pos[i * 3 + 1] = v.y;
+      pos[i * 3 + 2] = v.z;
+      uv[i * 2] = q.x / 1000;
+      uv[i * 2 + 1] = -q.y / 1000;
+    });
+    // orient every triangle outward (front faces +z, back faces -z) and sort them by panel
+    const tris = mesh.tris;
+    const region: number[] = [];
+    for (let k = 0; k < tris.length; k += 3) {
+      const a = mesh.pts[tris[k]];
+      const b = mesh.pts[tris[k + 1]];
+      const c = mesh.pts[tris[k + 2]];
+      // world y = -pattern y, so a positive pattern-space area means clockwise in world space
+      const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+      if ((area > 0) !== back) {
+        const tmp = tris[k + 1];
+        tris[k + 1] = tris[k + 2];
+        tris[k + 2] = tmp;
+      }
+      const cx = (a.x + b.x + c.x) / 3;
+      const cy = (a.y + b.y + c.y) / 3;
+      let r = REGION_BODY;
+      if (!pointInPolygon(cx, cy, bodyPoly)) {
+        if (hemBand && pointInPolygon(cx, cy, bandPoly)) r = REGION_BAND;
+        else {
+          r = cx >= 0 ? REGION_SLEEVE_POS : REGION_SLEEVE_NEG;
+          if (cuffH && sleeveLocal({ x: cx, y: cy })[1] > sLen) r = REGION_CUFF;
+        }
+      }
+      region.push(r);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    geo.setIndex(tris);
+    geo.computeVertexNormals();
+    addMesh(group, geo, mat);
+
+    // panel coordinates for the printed artwork
+    const pick = (want: number) => {
+      const out: number[] = [];
+      region.forEach((r, k) => {
+        if (r === want) out.push(tris[k * 3], tris[k * 3 + 1], tris[k * 3 + 2]);
+      });
+      return out;
+    };
+    const bx = new Float32Array(n);
+    const by = new Float32Array(n);
+    mesh.pts.forEach((q, i) => {
+      bx[i] = back ? -q.x : q.x;
+      by[i] = q.y;
+    });
+    surfaces.push({ panel: back ? 'back' : 'front', geo, px: bx, py: by, tris: pick(REGION_BODY) });
+    for (const [want, panel] of [[REGION_SLEEVE_POS, 'sleeveL'], [REGION_SLEEVE_NEG, 'sleeveR']] as const) {
+      const tr = pick(want);
+      if (!tr.length) continue;
+      const sx = new Float32Array(n);
+      const sy = new Float32Array(n);
+      // sleeve pieces are seen from the outside: keep the artwork readable on both layers
+      const flip = (want === REGION_SLEEVE_POS) !== back ? -1 : 1;
+      for (const i of new Set(tr)) {
+        const [xl, yl] = sleeveLocal(mesh.pts[i]);
+        sx[i] = flip * xl;
+        sy[i] = yl;
+      }
+      surfaces.push({ panel, geo, px: sx, py: sy, tris: tr });
+    }
+  };
+  makeLayer(neckF, false);
+  makeLayer(neckB, true);
+
+  // ---- neckline: rib band (T-shirt) or the rim where the hood is sewn in (hoodie) ----
+  const loop: THREE.Vector3[] = [];
+  for (const q of neckF) loop.push(toWorld(q, depth(q, false, true)));
+  for (const q of rev(neckB).slice(1, -1)) loop.push(toWorld(q, -depth(q, true, true)));
+  addMesh(group, neckBand(loop, hoodie ? 0.032 : 0.022, hoodie ? 0.4 : 0.16), mat);
+
+  if (hoodie) {
+    const k = M.m.chest / 980;
+    // hood laid down over the back: a padded two-layer shield hanging from the back neckline
+    const hk = Math.sqrt(k);
+    const hd = 360 * hk * 0.9;
+    const top = nw + 18;
+    const wide = nw + 105 * hk;
+    const hoodOutline = closeLoop(
+      concat(
+        [{ x: -top, y: 6 }, { x: 0, y: 6 }, { x: top, y: 6 }],
+        bezier({ x: top, y: 6 }, { x: wide + 30, y: hd * 0.25 }, { x: wide + 10, y: hd * 0.82 }, { x: 0, y: hd }, 16),
+        bezier({ x: 0, y: hd }, { x: -wide - 10, y: hd * 0.82 }, { x: -wide - 30, y: hd * 0.25 }, { x: -top, y: 6 }, 16),
+      ),
+    );
+    const hoodEdge = segsOf([[...hoodOutline.slice(2), hoodOutline[0]]]);
+    const hm = meshRegion(hoodOutline, [[{ x: 0, y: 6 }, { x: 0, y: hd }]], 10);
+    const hpos: number[] = [];
+    for (const q of hm.pts) {
+      const lift = 22 * roundProfile(distToSegs(q.x, q.y, hoodEdge) / 45) * (1 - 0.2 * Math.exp(-((q.x / 8) ** 2)));
+      const v = toWorld(q, -depth(q, true, true) - 3 - lift);
+      hpos.push(v.x, v.y, v.z);
+    }
+    addMesh(group, layerGeometry(hm, hpos, true), mat);
+
+    // kangaroo pocket stitched onto the front, open along the slanted edges
+    const pw = 360 * k;
+    const pb = hemY - 25;
+    const pt = pb - 230 * k;
+    const P = [
+      { x: -pw * 0.33, y: pt }, { x: pw * 0.33, y: pt }, { x: pw / 2, y: pt + 95 * k }, { x: pw / 2, y: pb },
+      { x: -pw / 2, y: pb }, { x: -pw / 2, y: pt + 95 * k },
+    ];
+    const pocketSewn = segsOf([[P[5], P[0], P[1]], [P[2], P[3], P[4], P[5]]]);
+    const pm = meshRegion(P, [], 9);
+    const ppos: number[] = [];
+    for (const q of pm.pts) {
+      const v = toWorld(q, depth(q, false, true) + 1.2 + 2.6 * roundProfile(distToSegs(q.x, q.y, pocketSewn) / 12));
+      ppos.push(v.x, v.y, v.z);
+    }
+    addMesh(group, layerGeometry(pm, ppos, false), mat);
+
+    // drawcords hanging from the hood rim
+    const cordMat = new THREE.MeshPhysicalMaterial({ color: 0xf5f5f0, roughness: 0.7, sheen: 1, sheenRoughness: 0.5 });
+    const neckDepth = neckF.reduce((m, q) => Math.max(m, q.y), 0);
+    for (const s of [-1, 1]) {
+      const pts = [0, 0.35, 0.7, 1].map((f) => {
+        const q = { x: s * (32 + f * 8), y: neckDepth - 8 + f * 230 };
+        return toWorld(q, depth(q, false, true) + 4 + (pointInPolygon(q.x, q.y, P) ? 3.8 : 0));
+      });
+      addMesh(group, new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, 0.0032, 8), cordMat);
+      const tip = new THREE.CylinderGeometry(0.0036, 0.0036, 0.022, 10);
+      addMesh(group, tip, cordMat).position.copy(pts[3]).add(V(0, -0.01, 0));
+    }
+  }
+
+  if (hanger) {
+    const slope = (SP.y - shoulderR[0].y) / (SP.x - nw);
+    addHanger(group, topW / 1000, nw / 1000, SP.x / 1000, slope);
   }
   return surfaces;
 }
 
+/** Mesh a meshRegion result with given world positions; outward = -z when `back`. */
+function layerGeometry(m: RegionMesh, pos: number[], back: boolean): THREE.BufferGeometry {
+  const tris = [...m.tris];
+  for (let k = 0; k < tris.length; k += 3) {
+    const a = m.pts[tris[k]];
+    const b = m.pts[tris[k + 1]];
+    const c = m.pts[tris[k + 2]];
+    const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if ((area > 0) !== back) {
+      const tmp = tris[k + 1];
+      tris[k + 1] = tris[k + 2];
+      tris[k + 2] = tmp;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(m.pts.flatMap((q) => [q.x / 1000, -q.y / 1000]), 2));
+  g.setIndex(tris);
+  g.computeVertexNormals();
+  return g;
+}
+
 /**
- * Wooden clothes hanger: a flat, lacquered shoulder-shaped body that sits inside the
- * garment just under the shoulder line, and a chrome "?" hook in the same plane rising
- * out of the neck opening (as on a real hanger, the hook and the body are coplanar).
+ * Folded rib band around a closed neckline loop: rises from the seam, rolls over at the top
+ * edge and comes back down on the inside.
  */
-function addHanger(group: THREE.Group, L: number, sh: number, neckR: number) {
+function neckBand(loop: THREE.Vector3[], height: number, tilt: number): THREE.BufferGeometry {
+  const prof: [number, number][] = [
+    [0, 0], [0.45, 0], [0.8, 0.0003], [0.96, 0.0011], [1, 0.0022], [0.95, 0.0033], [0.7, 0.0038], [0, 0.0038],
+  ];
+  const n = loop.length;
+  const cols = prof.length;
+  const pos: number[] = [];
+  const uv: number[] = [];
+  let run = 0;
+  for (let i = 0; i <= n; i++) {
+    const P = loop[i % n];
+    if (i > 0) run += P.distanceTo(loop[i - 1]);
+    const m = V(-P.x, 0, -P.z);
+    if (m.lengthSq() < 1e-10) m.set(0, 0, -1);
+    m.normalize();
+    const up = V(0, 1, 0).addScaledVector(m, tilt).normalize();
+    for (const [s, r] of prof) {
+      pos.push(P.x + up.x * s * height + m.x * r, P.y + up.y * s * height + m.y * r, P.z + up.z * s * height + m.z * r);
+      uv.push(run, s * height);
+    }
+  }
+  const idx: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < cols - 1; j++) {
+      const a = i * cols + j;
+      const b = a + 1;
+      const c = a + cols;
+      const d = c + 1;
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * Wooden clothes hanger: a flat, lacquered body following the shoulder slope just under the
+ * shoulder seams, and a chrome "?" hook in the same plane rising out of the neck opening
+ * (as on a real hanger, the hook and the body are coplanar).
+ */
+function addHanger(group: THREE.Group, hpsY: number, nw: number, sh: number, slope: number) {
   const metal = new THREE.MeshPhysicalMaterial({ color: 0xd4d8de, metalness: 1, roughness: 0.18 });
   const wood = new THREE.MeshPhysicalMaterial({ color: 0x9a6438, roughness: 0.5, clearcoat: 0.6, clearcoatRoughness: 0.25 });
-  // centred in the neck opening (the neck rings are pushed slightly to the back)
-  const zc = -0.01;
+  const zc = 0;
   const thick = 0.011;
 
   // --- wooden body (profile in the XY plane, extruded along z) ---
-  const half = Math.min(sh * 0.86, 0.22);
-  const topC = L - 0.017; // top of the body at the centre, just under the collar
-  const flat = Math.min(0.035, neckR * 0.4); // flat top around the hook ferrule
-  const topY = (x: number) => {
-    const d = Math.max(0, Math.abs(x) - flat);
-    // gentle shoulder slope that ends ~5 cm below the neck, like the shirt's shoulder seam
-    return topC - 0.2 * d - 0.35 * d * d;
-  };
+  const half = sh - 0.025;
+  const topC = hpsY - 0.007; // just under the high shoulder point
+  const topY = (x: number) => topC - slope * Math.max(0, Math.abs(x) - nw);
   const depthAt = (x: number) => 0.036 - 0.014 * (Math.abs(x) / half); // taller in the middle
   const shape = new THREE.Shape();
   const n = 24;
@@ -1148,11 +1413,9 @@ function addHanger(group: THREE.Group, L: number, sh: number, neckR: number) {
     const x = -half + (2 * half * i) / n;
     shape.lineTo(x, topY(x));
   }
-  // rounded right end
   shape.quadraticCurveTo(half + endR * 1.1, topY(half) - endR, half, topY(half) - depthAt(half));
   for (let i = n - 1; i >= 0; i--) {
     const x = -half + (2 * half * i) / n;
-    // taller in the middle, so the underside is flatter than the top
     shape.lineTo(x, topY(x) - depthAt(x));
   }
   shape.quadraticCurveTo(-half - endR * 1.1, topY(-half) - endR, -half, topY(-half));
@@ -1176,7 +1439,7 @@ function addHanger(group: THREE.Group, L: number, sh: number, neckR: number) {
   // --- hook: straight stem, then a "?" curl over to one side ending in a ball tip ---
   const wire = 0.0026;
   const R = 0.026;
-  const stemTop = L + 0.045;
+  const stemTop = hpsY + 0.05;
   const pts: THREE.Vector3[] = [];
   for (let i = 0; i <= 8; i++) pts.push(V(0, topC + ((stemTop - topC) * i) / 8, zc));
   const endA = Math.PI * 1.22;
@@ -1188,6 +1451,44 @@ function addHanger(group: THREE.Group, L: number, sh: number, neckR: number) {
   addMesh(group, new THREE.TubeGeometry(hookCurve, 96, wire, 12), metal);
   const tip = pts[pts.length - 1];
   addMesh(group, new THREE.SphereGeometry(wire * 1.35, 16, 12), metal).position.copy(tip);
+}
+
+/** Transparent overlay that carries a panel texture on a pattern-built garment mesh. */
+function meshPrintOverlay(s: MeshPrintSurface, tex: PanelTexture): THREE.Mesh {
+  const pos = s.geo.getAttribute('position') as THREE.BufferAttribute;
+  const nrm = s.geo.getAttribute('normal') as THREE.BufferAttribute;
+  const used = [...new Set(s.tris)];
+  const remap = new Map<number, number>();
+  const b = tex.bounds;
+  const bw = b.maxX - b.minX;
+  const bh = b.maxY - b.minY;
+  const outPos = new Float32Array(used.length * 3);
+  const outNrm = new Float32Array(used.length * 3);
+  const outUv = new Float32Array(used.length * 2);
+  used.forEach((v, i) => {
+    remap.set(v, i);
+    const nx = nrm.getX(v);
+    const ny = nrm.getY(v);
+    const nz = nrm.getZ(v);
+    outPos[i * 3] = pos.getX(v) + nx * 0.0009;
+    outPos[i * 3 + 1] = pos.getY(v) + ny * 0.0009;
+    outPos[i * 3 + 2] = pos.getZ(v) + nz * 0.0009;
+    outNrm[i * 3] = nx;
+    outNrm[i * 3 + 1] = ny;
+    outNrm[i * 3 + 2] = nz;
+    outUv[i * 2] = (s.px[v] - b.minX) / bw;
+    outUv[i * 2 + 1] = 1 - (s.py[v] - b.minY) / bh;
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(outPos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(outNrm, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(outUv, 2));
+  g.setIndex(s.tris.map((v) => remap.get(v)!));
+  const m = new THREE.Mesh(g, createInkMaterial(tex.texture));
+  m.name = `print-${s.panel}`;
+  m.renderOrder = 1;
+  m.receiveShadow = true;
+  return m;
 }
 
 /**
@@ -1361,7 +1662,7 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
   const group = new THREE.Group();
   outer.add(group);
   FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1));
-  let surfaces: PrintSurface[] = [];
+  let surfaces: (PrintSurface | MeshPrintSurface)[] = [];
   switch (p.garment) {
     case 'hoodie':
       surfaces = buildTop(group, p, mat, true, !!options.hanger);
@@ -1387,7 +1688,7 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
       const own = surfaces.filter((s) => s.panel === panel.id);
       if (!own.length) continue;
       const tex = createPanelTexture(panel.id, panel.bounds, panel.seam);
-      const meshes = own.map((s) => printOverlay(s, tex));
+      const meshes = own.map((s) => ('tris' in s ? meshPrintOverlay(s, tex) : printOverlay(s, tex)));
       meshes.forEach((m) => group.add(m));
       prints.push({ tex, meshes });
     }
