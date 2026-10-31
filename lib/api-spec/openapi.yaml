@@ -1,0 +1,488 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: Cut & Render API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: projects
+    description: Product projects and their cut plans
+  - name: activity
+    description: Recent activity
+  - name: storage
+    description: Artwork image uploads and serving
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /projects:
+    get:
+      operationId: listProjects
+      tags: [projects]
+      summary: List projects
+      parameters:
+        - name: productType
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ProductType"
+      responses:
+        "200":
+          description: Projects, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProjectSummary"
+    post:
+      operationId: createProject
+      tags: [projects]
+      summary: Create project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+  /projects/summary:
+    get:
+      operationId: getProjectsSummary
+      tags: [projects]
+      summary: Aggregate stats across all projects
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectsSummary"
+  /projects/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getProject
+      tags: [projects]
+      summary: Get project with full cut plan
+      responses:
+        "200":
+          description: Project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateProject
+      tags: [projects]
+      summary: Update project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteProject
+      tags: [projects]
+      summary: Delete project
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+  /projects/{id}/duplicate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      operationId: duplicateProject
+      tags: [projects]
+      summary: Duplicate a project
+      responses:
+        "201":
+          description: Copy created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          description: Not found
+  /projects/{id}/exports:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: listProjectExports
+      tags: [projects]
+      summary: Export history of a project
+      responses:
+        "200":
+          description: Exports, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ExportRecord"
+    post:
+      operationId: recordProjectExport
+      tags: [projects]
+      summary: Record that a cut plan or render was exported
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportInput"
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportRecord"
+        "404":
+          description: Not found
+  /activity/recent:
+    get:
+      operationId: getRecentActivity
+      tags: [activity]
+      summary: Recent activity feed across projects
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Activity items, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityItem"
+  /storage/uploads/request-url:
+    post:
+      tags: [storage]
+      operationId: requestUploadUrl
+      summary: Request a presigned URL for an artwork image upload (signed-in users only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUrlRequest'
+      responses:
+        '200':
+          description: Presigned upload URL generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          description: Missing or invalid required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Not signed in.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to generate upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /storage/public-objects/{filePath}:
+    get:
+      tags: [storage]
+      operationId: getPublicObject
+      summary: Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object content.
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /storage/objects/{objectPath}:
+    get:
+      tags: [storage]
+      operationId: getStorageObject
+      summary: Serve an uploaded artwork image
+      parameters:
+        - name: objectPath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object content.
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Object not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+components:
+  schemas:
+    UploadUrlRequest:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        size:
+          type: integer
+          minimum: 1
+          maximum: 26214400
+        contentType:
+          type: string
+          minLength: 1
+    UploadUrlResponse:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL:
+          type: string
+          format: uri
+        objectPath:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/UploadUrlRequest'
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    ProductType:
+      type: string
+      enum: [apparel, packaging, ppf]
+    ExportFormat:
+      type: string
+      enum: [svg, dxf, pdf, png, json]
+    PlanStats:
+      type: object
+      description: Key numbers of a generated cut plan, all in millimetres
+      properties:
+        pieceCount: { type: integer }
+        totalAreaMm2: { type: number }
+        cutLengthMm: { type: number }
+        foldLengthMm: { type: number }
+        sheetWidthMm: { type: number }
+        sheetHeightMm: { type: number }
+        utilization:
+          type: number
+          description: 0..1 share of the sheet covered by pieces
+      required: [pieceCount, totalAreaMm2, cutLengthMm, foldLengthMm, sheetWidthMm, sheetHeightMm, utilization]
+    ProjectSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        productType: { $ref: "#/components/schemas/ProductType" }
+        template: { type: string }
+        materialId: { type: string }
+        modelFileName: { type: ["string", "null"] }
+        modelFormat: { type: ["string", "null"] }
+        planStats:
+          oneOf:
+            - $ref: "#/components/schemas/PlanStats"
+            - type: "null"
+        exportCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, productType, template, materialId, modelFileName, modelFormat, planStats, exportCount, createdAt, updatedAt]
+    Project:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        productType: { $ref: "#/components/schemas/ProductType" }
+        template: { type: string }
+        materialId: { type: string }
+        parameters:
+          type: object
+          additionalProperties: true
+          description: Product-specific parameters (dimensions, size, options)
+        renderSettings:
+          type: object
+          additionalProperties: true
+          description: Viewer settings (environment, path tracing, camera)
+        modelFileName: { type: ["string", "null"] }
+        modelFormat: { type: ["string", "null"] }
+        planStats:
+          oneOf:
+            - $ref: "#/components/schemas/PlanStats"
+            - type: "null"
+        plan:
+          type: ["object", "null"]
+          additionalProperties: true
+          description: Full generated CutPlan JSON
+        exportCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, productType, template, materialId, parameters, renderSettings, modelFileName, modelFormat, planStats, plan, exportCount, createdAt, updatedAt]
+    ProjectInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        productType: { $ref: "#/components/schemas/ProductType" }
+        template: { type: string, minLength: 1 }
+        materialId: { type: string, minLength: 1 }
+        parameters:
+          type: object
+          additionalProperties: true
+        renderSettings:
+          type: object
+          additionalProperties: true
+        modelFileName: { type: ["string", "null"] }
+        modelFormat: { type: ["string", "null"] }
+      required: [name, productType, template, materialId]
+    ProjectUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        template: { type: string, minLength: 1 }
+        materialId: { type: string, minLength: 1 }
+        parameters:
+          type: object
+          additionalProperties: true
+        renderSettings:
+          type: object
+          additionalProperties: true
+        modelFileName: { type: ["string", "null"] }
+        modelFormat: { type: ["string", "null"] }
+        planStats:
+          oneOf:
+            - $ref: "#/components/schemas/PlanStats"
+            - type: "null"
+        plan:
+          type: ["object", "null"]
+          additionalProperties: true
+    ProjectsSummary:
+      type: object
+      properties:
+        totalProjects: { type: integer }
+        byType:
+          type: object
+          properties:
+            apparel: { type: integer }
+            packaging: { type: integer }
+            ppf: { type: integer }
+          required: [apparel, packaging, ppf]
+        totalPieces: { type: integer }
+        totalCutLengthMm: { type: number }
+        totalAreaMm2: { type: number }
+        totalExports: { type: integer }
+        exportsByFormat:
+          type: object
+          additionalProperties: { type: integer }
+      required: [totalProjects, byType, totalPieces, totalCutLengthMm, totalAreaMm2, totalExports, exportsByFormat]
+    ExportInput:
+      type: object
+      properties:
+        format: { $ref: "#/components/schemas/ExportFormat" }
+        fileName: { type: string, minLength: 1 }
+      required: [format, fileName]
+    ExportRecord:
+      type: object
+      properties:
+        id: { type: integer }
+        projectId: { type: integer }
+        format: { $ref: "#/components/schemas/ExportFormat" }
+        fileName: { type: string }
+        createdAt: { type: string, format: date-time }
+      required: [id, projectId, format, fileName, createdAt]
+    ActivityItem:
+      type: object
+      properties:
+        id: { type: integer }
+        projectId: { type: ["integer", "null"] }
+        projectName: { type: string }
+        productType: { $ref: "#/components/schemas/ProductType" }
+        kind:
+          type: string
+          enum: [created, updated, exported, duplicated, deleted]
+        detail: { type: string }
+        createdAt: { type: string, format: date-time }
+      required: [id, projectId, projectName, productType, kind, detail, createdAt]

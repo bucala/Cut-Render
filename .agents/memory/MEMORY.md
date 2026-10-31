@@ -1,0 +1,1 @@
+- [PPF flattening quality](ppf-flattening.md) — smooth triangle-stepped boundaries before offset, then strip offset self-intersections, or cut lines get jagged loops.

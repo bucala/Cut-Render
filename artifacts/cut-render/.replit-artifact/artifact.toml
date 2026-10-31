@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Cut & Render"
+description = "A web app for designing manufacturable products and generating production cut plans. The user picks a product type (clothing sewing patterns, packaging boxes with cut and fold dielines, or PPF protective film cut patterns for small and large shaped objects), imports 3D models (STL, OBJ, GLB/GLTF, FBX, STEP, IGES) with automatic format detection, previews them in a photorealistic path-traced 3D viewer with simulated materials, and exports flat 2D cut plans as SVG, DXF, and PDF."
+version = "1.0.0"
+id = "artifacts/cut-render"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 26256
+
+[services.development]
+run = "pnpm --filter @workspace/cut-render run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/cut-render", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/cut-render/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "26256"
+BASE_PATH = "/"
