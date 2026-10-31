@@ -15,6 +15,7 @@ export const LINE_SK: Record<LineKind, string> = {
 
 export const ENV_SK: Record<string, { label: string; description: string }> = {
   studio: { label: 'Fotoštúdio', description: 'Neutrálne štúdio s veľkými softboxmi.' },
+  window: { label: 'Prirodzené svetlo z okna', description: 'Chladné denné svetlo cez veľké okno a jemná teplá výplň.' },
   softbox: { label: 'Produktový softbox', description: 'Jasné rovnomerné svetlo pre obaly.' },
   workshop: { label: 'Dielňa', description: 'Teplé interiérové svetlo s odleskami okien.' },
   sunset: { label: 'Zlatá hodinka', description: 'Nízke teplé slnko, dlhé odrazy na laku a fólii.' },

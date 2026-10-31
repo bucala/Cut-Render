@@ -14,3 +14,5 @@ export * from './viewer';
 export * from './model-store';
 export * from './react';
 export * from './project';
+export * from './render-materials';
+export * from './projected-logo';

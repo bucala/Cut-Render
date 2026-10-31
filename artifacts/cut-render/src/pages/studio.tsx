@@ -1,5 +1,6 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useUser } from '@clerk/react';
+import { Vector2 } from 'three';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { Link, useParams } from 'wouter';
 import { useQueryClient } from '@tanstack/react-query';
@@ -13,14 +14,15 @@ import {
 } from '@workspace/api-client-react';
 import {
   useViewer, generateParametricPlan, buildBoxObject, buildGarmentObject, buildPpfObject, generatePpfPlan, createSampleModel,
-  loadModelFile, saveModelFile, importModel, getMaterialsFor, BASE_PAINTS, ENVIRONMENTS, BOX_STYLES, GARMENT_TEMPLATES, SIZES,
+  loadModelFile, saveModelFile, importModel, getMaterialsFor, BASE_PAINTS, BOX_STYLES, GARMENT_TEMPLATES, SIZES,
   exportPlan, ACCEPT_ATTRIBUTE, type Viewer, type ViewerStats, type CutPlan, type ImportedModel, type PpfResult, type ProgressInfo,
-  type BoxParams, type GarmentParams, type PpfParams, type PlanExportFormat, type EnvironmentId,
+  type BoxParams, type GarmentParams, type PpfParams, type PlanExportFormat,
   getPrintPanels, garmentSupportsArtwork, sanitizeArtwork, ensureArtworkFonts, onArtworkAssets, newLayerId,
   type ArtworkLayer, type PanelId, type PrintPanel,
 } from '@/engine';
 import { DesignBoard } from '@/components/design-board';
 import { ArtworkPanel } from '@/components/artwork-panel';
+import { VisualizerPanel, StudioRenderProgress, type VisualizerSettings } from '@/components/visualizer-panel';
 import { useSignInHref } from '@/components/account';
 import { uploadArtworkImage } from '@/lib/upload';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -31,12 +33,12 @@ import { useToast } from '@/hooks/use-toast';
 import { PlanCanvas, Legend, PieceInfo } from '@/components/plan-canvas';
 import { Logo } from '@/components/shell';
 import {
-  PRODUCT_SK, TEMPLATE_SK, ENV_SK, PAINT_SK, MATERIAL_DESC_SK, CATEGORY_SK, area, mm, num, pct, dateTime, engineError, templateName,
+  PRODUCT_SK, TEMPLATE_SK, PAINT_SK, MATERIAL_DESC_SK, CATEGORY_SK, area, mm, num, pct, dateTime, engineError, templateName,
 } from '@/lib/sk';
 import { cn } from '@/lib/utils';
 
-type RS = { environment: EnvironmentId; exposure: number; pathTracing: boolean; maxSamples: number; showGround: boolean; autoRotate: boolean; color: string | null; showPieces: boolean; wrinkles: number; hanger: boolean };
-const RS_DEFAULT: RS = { environment: 'studio', exposure: 1, pathTracing: true, maxSamples: 512, showGround: true, autoRotate: false, color: null, showPieces: true, wrinkles: 1, hanger: false };
+type RS = VisualizerSettings & { color: string | null; showPieces: boolean; wrinkles: number; hanger: boolean; hangerFinish: 'white' | 'birch'; knitSize: number; fabricStrength: number; sheen: number; gobo: boolean };
+const RS_DEFAULT: RS = { environment: 'studio', exposure: 1, pathTracing: true, maxSamples: 512, showGround: true, autoRotate: false, color: null, showPieces: true, wrinkles: 1, hanger: true, hangerFinish: 'white', knitSize: 0.8, fabricStrength: 0.65, sheen: 0.45, gobo: false, textures: true, normalMaps: true, roughness: null, metalness: null, shadowQuality: 'soft' };
 
 /** Common garment fabric colours. */
 const FABRIC_SWATCHES: { c: string; n: string }[] = [
@@ -168,6 +170,18 @@ function Workspace({ project }: { project: Project }) {
   const [rs, setRs] = useState<RS>({ ...RS_DEFAULT, ...(project.renderSettings as Partial<RS>) });
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [stats, setStats] = useState<ViewerStats | null>(null);
+  const [logoName, setLogoName] = useState<string | null>(null);
+  const [logoBusy, setLogoBusy] = useState(false);
+  const applyLogo = async (file: File, point?: Vector2) => {
+    if (!viewer || logoBusy) return;
+    setLogoBusy(true);
+    try {
+      await viewer.setLogo(file, point);
+      setLogoName(file.name);
+      setR('textures', true);
+    } catch (e) { toast({ title: 'Logo sa nepodarilo aplikovať', description: engineError(e), variant: 'destructive' }); }
+    finally { setLogoBusy(false); }
+  };
   const [fold, setFold] = useState(type === 'packaging' ? 0 : 1);
   const [selected, setSelected] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
@@ -311,6 +325,11 @@ function Workspace({ project }: { project: Project }) {
   useEffect(() => { if (viewer) try { viewer.setMaxSamples(rs.maxSamples); } catch { /* */ } }, [viewer, rs.maxSamples]);
   useEffect(() => { if (viewer) try { viewer.setShowGround(rs.showGround); } catch { /* */ } }, [viewer, rs.showGround]);
   useEffect(() => { if (viewer) try { viewer.setAutoRotate(rs.autoRotate); } catch { /* */ } }, [viewer, rs.autoRotate]);
+  useEffect(() => { viewer?.setShadowQuality(rs.shadowQuality); }, [viewer, rs.shadowQuality]);
+  useEffect(() => { viewer?.setGobo(type === 'apparel' && rs.gobo); }, [viewer, type, rs.gobo]);
+  useEffect(() => {
+    viewer?.setMaterialControls({ textures: rs.textures, normalMaps: rs.normalMaps, roughness: rs.roughness, metalness: rs.metalness });
+  }, [viewer, rs.textures, rs.normalMaps, rs.roughness, rs.metalness]);
 
   const framed = useRef(false);
   const artworkRef = useRef(artwork); artworkRef.current = artwork;
@@ -318,16 +337,17 @@ function Workspace({ project }: { project: Project }) {
   useEffect(() => {
     if (!viewer) return;
     if (type === 'ppf' && !model) return;
-    try {
+    const timer = window.setTimeout(() => { try {
       const obj = type === 'packaging' ? buildBoxObject(params as unknown as BoxParams, materialId, { fold, color: rs.color })
-        : type === 'apparel' ? buildGarmentObject(params as unknown as GarmentParams, materialId, { color: rs.color, artwork: artworkRef.current, wrinkles: rs.wrinkles, hanger: rs.hanger })
+        : type === 'apparel' ? buildGarmentObject(params as unknown as GarmentParams, materialId, { color: rs.color, artwork: artworkRef.current, wrinkles: rs.wrinkles, hanger: rs.hanger, hangerFinish: rs.hangerFinish, knitSize: rs.knitSize, fabricStrength: rs.fabricStrength, sheen: rs.sheen })
         : buildPpfObject(model!, ppf, params as unknown as PpfParams, materialId, { showPieces: rs.showPieces, color: rs.color });
       viewer.setContent(obj, { frame: !framed.current });
       contentRef.current = obj;
       framed.current = true; setBuildErr(null);
-    } catch (e) { setBuildErr(engineError(e)); }
+    } catch (e) { setBuildErr(engineError(e)); } }, type === 'apparel' ? 120 : 0);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewer, type, paramsKey, materialId, rs.color, rs.showPieces, rs.wrinkles, rs.hanger, fold, model, ppf]);
+  }, [viewer, type, paramsKey, materialId, rs.color, rs.showPieces, rs.wrinkles, rs.hanger, rs.hangerFinish, rs.knitSize, rs.fabricStrength, rs.sheen, fold, model, ppf]);
 
   // redraw the print textures in place (no geometry rebuild) when layers change or images/fonts arrive
   const artworkKey = JSON.stringify(artwork);
@@ -406,20 +426,30 @@ function Workspace({ project }: { project: Project }) {
     } catch (e) { toast({ title: 'Export zlyhal', description: engineError(e), variant: 'destructive' }); }
   };
   const [snapBusy, setSnapBusy] = useState(false);
-  const snapshot = async () => {
+  const [studioProgress, setStudioProgress] = useState<number | null>(null);
+  const studioAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => studioAbort.current?.abort(), []);
+  const saveSnapshot = async (studio = false) => {
     if (!viewer) return;
+    const abort = new AbortController();
+    if (studio) { studioAbort.current = abort; setStudioProgress(0); }
     setSnapBusy(true);
     try {
-      const blob = await viewer.snapshot();
-      const fileName = `${baseName}-render.png`;
+      const blob = studio
+        ? await viewer.studioRender({ signal: abort.signal, onProgress: setStudioProgress })
+        : await viewer.snapshot();
+      const fileName = `${baseName}-${studio ? 'studio-4k' : 'render'}.png`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a'); a.href = url; a.download = fileName; a.click();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
       record.mutate({ id: project.id, data: { format: 'png', fileName } });
       toast({ title: 'Render uložený', description: fileName });
-    } catch (e) { toast({ title: 'Snímku sa nepodarilo vytvoriť', description: engineError(e), variant: 'destructive' }); }
-    finally { setSnapBusy(false); }
+    } catch (e) {
+      if (!abort.signal.aborted) toast({ title: 'Snímku sa nepodarilo vytvoriť', description: engineError(e), variant: 'destructive' });
+    }
+    finally { setSnapBusy(false); setStudioProgress(null); studioAbort.current = null; }
   };
+  const snapshot = () => saveSnapshot();
 
   /* -------- render */
   const progress = stats ? Math.min(1, stats.samples / Math.max(1, stats.maxSamples)) : 0;
@@ -427,6 +457,7 @@ function Workspace({ project }: { project: Project }) {
 
   return (
     <div className="h-[100dvh] flex flex-col bg-background">
+      {studioProgress !== null && <StudioRenderProgress progress={studioProgress} onCancel={() => studioAbort.current?.abort()} />}
       {/* top bar */}
       <header className="h-14 shrink-0 bg-sidebar text-sidebar-foreground flex items-center gap-3 px-3 md:px-4">
         <Link href="/projects" className="p-1.5 rounded hover:bg-sidebar-accent" data-testid="link-back-projects" aria-label="Späť"><ArrowLeft className="w-4 h-4" /></Link>
@@ -488,7 +519,15 @@ function Workspace({ project }: { project: Project }) {
           <ResizablePanelGroup direction="vertical">
             <ResizablePanel ref={topPanel} defaultSize={56} minSize={20} collapsible collapsedSize={0}
               onCollapse={() => setLayout('pattern')} onExpand={() => setLayout((l) => (l === 'pattern' ? 'split' : l))}>
-              <div className="relative h-full darkroom overflow-hidden">
+              <div className="relative h-full darkroom overflow-hidden"
+                onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const file = e.dataTransfer.files[0];
+                  if (!file) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  void applyLogo(file, new Vector2((e.clientX - rect.left) / rect.width * 2 - 1, 1 - (e.clientY - rect.top) / rect.height * 2));
+                }}>
                 <LocalBoundary fallback={(e) => <ViewerPending text={engineError(e)} />}>
                   <ViewerStage onViewer={setViewer} onStats={setStats} />
                 </LocalBoundary>
@@ -636,6 +675,9 @@ function Workspace({ project }: { project: Project }) {
               {type === 'apparel' && (
                 <Section title="Vzhľad">
                   <NumField id="wrinkles" label="Vrásky látky" unit="%" value={Math.round(rs.wrinkles * 100)} min={0} max={250} step={5} onChange={(v) => setR('wrinkles', v / 100)} />
+                  <NumField id="knit-size" label="Veľkosť úpletu / väzby" unit="mm" value={rs.knitSize} min={0.6} max={2.5} step={0.1} onChange={(v) => setR('knitSize', v)} />
+                  <NumField id="fabric-strength" label="Reliéf vlákien" unit="%" value={Math.round(rs.fabricStrength * 100)} min={0} max={200} step={5} onChange={(v) => setR('fabricStrength', v / 100)} />
+                  <NumField id="fabric-sheen" label="Jemný lesk vlákien" unit="%" value={Math.round(rs.sheen * 100)} min={0} max={100} step={5} onChange={(v) => setR('sheen', v / 100)} />
                   {params.garment !== 'tote' && params.garment !== 'trousers' && params.garment !== 'skirt' && (
                     <label className="flex items-center justify-between text-sm">Vešiak<Switch checked={rs.hanger} onCheckedChange={(v) => setR('hanger', v)} data-testid="switch-hanger" /></label>
                   )}
@@ -657,34 +699,22 @@ function Workspace({ project }: { project: Project }) {
             </>
           )}
 
-          {tab === 'render' && (
-            <>
-              <Section title="Prostredie">
-                <div className="space-y-1">
-                  {ENVIRONMENTS.map((e) => (
-                    <button key={e.id} onClick={() => setR('environment', e.id)} data-testid={`button-env-${e.id}`}
-                      className={cn('w-full text-left p-2 rounded-md border transition-all', rs.environment === e.id ? 'border-primary bg-primary/5' : 'border-transparent hover:bg-muted/60')}>
-                      <div className="text-sm font-medium">{ENV_SK[e.id]?.label ?? e.label}</div>
-                      <div className="text-[11px] text-muted-foreground">{ENV_SK[e.id]?.description ?? e.description}</div>
-                    </button>
-                  ))}
-                </div>
-              </Section>
-              <Section title="Kamera a svetlo">
-                <NumField id="exposure" label="Expozícia" unit="EV" value={rs.exposure} min={0.2} max={3} step={0.05} onChange={(v) => setR('exposure', v)} />
-                <NumField id="samples" label="Max. vzoriek" unit="spp" value={rs.maxSamples} min={32} max={4096} step={32} onChange={(v) => setR('maxSamples', v)} />
-                <label className="flex items-center justify-between text-sm mb-2.5">Path tracing<Switch checked={rs.pathTracing} onCheckedChange={(v) => setR('pathTracing', v)} data-testid="switch-pathtracing" /></label>
-                <label className="flex items-center justify-between text-sm mb-2.5">Podlaha a tiene<Switch checked={rs.showGround} onCheckedChange={(v) => setR('showGround', v)} data-testid="switch-ground" /></label>
-                <label className="flex items-center justify-between text-sm">Automatické otáčanie<Switch checked={rs.autoRotate} onCheckedChange={(v) => setR('autoRotate', v)} data-testid="switch-autorotate" /></label>
-              </Section>
-              <Section title="Priebeh renderu">
-                <div className="font-mono text-xs tnum flex justify-between"><span>{stats ? (stats.mode === 'pathtracing' ? 'path tracing' : 'raster') : '—'}</span><span>{stats ? `${stats.samples} / ${stats.maxSamples}` : ''}</span></div>
-                <div className="h-1.5 bg-muted rounded mt-2 overflow-hidden"><div className="h-full bg-primary origin-left transition-transform" style={{ transform: `scaleX(${progress})` }} /></div>
-                <p className="text-[11px] text-muted-foreground mt-2">Pri pohybe kamery sa zobrazí rýchly náhľad. Keď kamera stojí, obraz sa progresívne dopočíta s globálnym osvetlením, odrazmi a lomom svetla.</p>
-                <button onClick={snapshot} disabled={!viewer || snapBusy} className="mt-3 w-full inline-flex items-center justify-center gap-2 border rounded-md py-2 text-sm hover:bg-muted disabled:opacity-40" data-testid="button-snapshot-panel"><Camera className="w-4 h-4" />Uložiť PNG (2x)</button>
-              </Section>
-            </>
-          )}
+          {tab === 'render' && (<>
+            {type === 'apparel' && <Section title="Odevné štúdio">
+              <label className="flex items-center justify-between text-sm mb-3">Tiene listov na pozadí<Switch checked={rs.gobo} onCheckedChange={(v) => setR('gobo', v)} data-testid="switch-gobo" /></label>
+              {params.garment !== 'tote' && params.garment !== 'trousers' && params.garment !== 'skirt' && <>
+                <label className="flex items-center justify-between text-sm mb-3">Ramienko<Switch checked={rs.hanger} onCheckedChange={(v) => setR('hanger', v)} data-testid="switch-studio-hanger" /></label>
+                {rs.hanger && <Seg id="hanger-finish" value={rs.hangerFinish} onChange={(v) => setR('hangerFinish', v)}
+                  options={[{ v: 'white', l: 'Biela matná' }, { v: 'birch', l: 'Prírodná breza' }]} />}
+              </>}
+              <p className="text-xs text-muted-foreground">Plošné softboxy a mäkké štúdiové svetlo. Vrásky a štruktúru vlákien upravíte v karte Materiál.</p>
+            </Section>}
+            <VisualizerPanel settings={rs} onChange={setR} stats={stats}
+              onSnapshot={snapshot} onStudioRender={() => saveSnapshot(true)} busy={snapBusy}
+              ready={!!viewer && !!contentRef.current && !buildErr} defaults={material?.physical ?? { roughness: 0.9, metalness: 0 }}
+              logoBusy={logoBusy} logoName={logoName} onLogo={(file) => { void applyLogo(file); }}
+              onClearLogo={() => { viewer?.clearLogo(); setLogoName(null); }} />
+          </>)}
 
           {tab === 'export' && (
             <>

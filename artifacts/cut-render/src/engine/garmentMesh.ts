@@ -119,7 +119,8 @@ export function meshRegion(outline: Point[], constraints: Point[][], step: numbe
     }
   }
 
-  const cells = cdt2d(pts, edges, { exterior: true, interior: true, delaunay: true });
+  const constrained = new Set(edges.map(([a, b]) => (a < b ? a * pts.length + b : b * pts.length + a)));
+  const cells = delaunayFlip(pts, cdt2d(pts, edges, { exterior: true, interior: true, delaunay: false }), constrained);
   const tris: number[] = [];
   for (const [a, b, c] of cells) {
     const cx = (pts[a][0] + pts[b][0] + pts[c][0]) / 3;
@@ -129,6 +130,72 @@ export function meshRegion(outline: Point[], constraints: Point[][], step: numbe
   return { pts: pts.map(([x, y]) => ({ x, y })), tris };
 }
 
+/**
+ * Lawson edge flips in floating point. cdt2d's own refinement evaluates every in-circle test
+ * with exact arithmetic, which made garment meshing take several seconds.
+ */
+function delaunayFlip(pts: [number, number][], cells: number[][], constrained: Set<number>): number[][] {
+  const n = pts.length;
+  const T = cells.length;
+  const v = new Int32Array(T * 3);
+  cells.forEach(([a, b, c], t) => {
+    const ccw = (pts[b][0] - pts[a][0]) * (pts[c][1] - pts[a][1]) - (pts[b][1] - pts[a][1]) * (pts[c][0] - pts[a][0]) > 0;
+    v[t * 3] = a;
+    v[t * 3 + 1] = ccw ? b : c;
+    v[t * 3 + 2] = ccw ? c : b;
+  });
+  // nb[t * 3 + i]: triangle across edge v[i] -> v[i + 1], or -1
+  const nb = new Int32Array(T * 3).fill(-1);
+  const owner = new Map<number, number>();
+  for (let s = 0; s < T * 3; s++) {
+    const a = v[s], b = v[s - (s % 3) + ((s % 3) + 1) % 3];
+    const key = a < b ? a * n + b : b * n + a;
+    const o = owner.get(key);
+    if (o === undefined) owner.set(key, s);
+    else { nb[s] = Math.floor(o / 3); nb[o] = Math.floor(s / 3); }
+  }
+  const slot = (t: number, x: number, y: number) => {
+    for (let i = 0; i < 3; i++) if (v[t * 3 + i] === x && v[t * 3 + (i + 1) % 3] === y) return t * 3 + i;
+    return -1;
+  };
+  const stack: number[] = [];
+  for (let t = 0; t < T; t++) stack.push(t);
+  let budget = T * 40;
+  while (stack.length && budget-- > 0) {
+    const t = stack.pop()!;
+    for (let i = 0; i < 3; i++) {
+      const u = nb[t * 3 + i];
+      if (u < 0) continue;
+      const a = v[t * 3 + i], b = v[t * 3 + (i + 1) % 3], c = v[t * 3 + (i + 2) % 3];
+      if (constrained.has(a < b ? a * n + b : b * n + a)) continue;
+      const su = slot(u, b, a);
+      if (su < 0) continue;
+      const j = su % 3;
+      const d = v[u * 3 + (j + 2) % 3];
+      const [dx, dy] = pts[d];
+      const ax = pts[a][0] - dx, ay = pts[a][1] - dy;
+      const bx = pts[b][0] - dx, by = pts[b][1] - dy;
+      const cx = pts[c][0] - dx, cy = pts[c][1] - dy;
+      const la = ax * ax + ay * ay, lb = bx * bx + by * by, lc = cx * cx + cy * cy;
+      const det = ax * (by * lc - lb * cy) - ay * (bx * lc - lb * cx) + la * (bx * cy - by * cx);
+      if (det <= 1e-9 * (la + lb + lc) ** 2) continue;
+      const nBC = nb[t * 3 + (i + 1) % 3], nCA = nb[t * 3 + (i + 2) % 3];
+      const nAD = nb[u * 3 + (j + 1) % 3], nDB = nb[u * 3 + (j + 2) % 3];
+      // t = (a, d, c), u = (d, b, c)
+      v[t * 3] = a; v[t * 3 + 1] = d; v[t * 3 + 2] = c;
+      nb[t * 3] = nAD; nb[t * 3 + 1] = u; nb[t * 3 + 2] = nCA;
+      v[u * 3] = d; v[u * 3 + 1] = b; v[u * 3 + 2] = c;
+      nb[u * 3] = nDB; nb[u * 3 + 1] = nBC; nb[u * 3 + 2] = t;
+      if (nBC >= 0) for (let k = 0; k < 3; k++) if (nb[nBC * 3 + k] === t) nb[nBC * 3 + k] = u;
+      if (nAD >= 0) for (let k = 0; k < 3; k++) if (nb[nAD * 3 + k] === u) nb[nAD * 3 + k] = t;
+      stack.push(t, u);
+      break;
+    }
+  }
+  const out: number[][] = [];
+  for (let t = 0; t < T; t++) out.push([v[t * 3], v[t * 3 + 1], v[t * 3 + 2]]);
+  return out;
+}
 /** Rounded quarter-ellipse profile: 0 at the seam, 1 once `t` reaches 1. */
 export function roundProfile(t: number): number {
   const u = Math.min(1, Math.max(0, t));
