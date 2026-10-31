@@ -1118,24 +1118,76 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   return surfaces;
 }
 
-/** Chrome wire hanger: hook above the neck and a bar hidden inside the shoulders. */
+/**
+ * Wooden clothes hanger: a flat, lacquered shoulder-shaped body that sits inside the
+ * garment just under the shoulder line, and a chrome "?" hook in the same plane rising
+ * out of the neck opening (as on a real hanger, the hook and the body are coplanar).
+ */
 function addHanger(group: THREE.Group, L: number, sh: number, neckR: number) {
-  const metal = new THREE.MeshPhysicalMaterial({ color: 0xc8ccd2, metalness: 1, roughness: 0.22 });
-  const wood = new THREE.MeshPhysicalMaterial({ color: 0x8a5a36, roughness: 0.55, clearcoat: 0.4, clearcoatRoughness: 0.3 });
-  const z = -neckR * 0.35;
-  // hook: a 3/4 circle opening to the front-left
-  const hookR = 0.034;
-  const hook = new THREE.TorusGeometry(hookR, 0.0026, 10, 48, Math.PI * 1.45);
-  const hm = addMesh(group, hook, metal);
-  hm.rotation.z = -Math.PI * 0.42;
-  hm.position.set(-hookR * 0.15, L + 0.075, z);
-  // stem from the hook down into the neck
-  const stem = new THREE.CylinderGeometry(0.0026, 0.0026, 0.07, 10);
-  const st = addMesh(group, stem, metal);
-  st.position.set(0, L + 0.03, z);
-  // wooden bar sitting just under the shoulder line
-  const bar = new THREE.CatmullRomCurve3([V(-sh * 0.92, L - 0.06, z), V(-sh * 0.45, L - 0.03, z), V(0, L - 0.012, z), V(sh * 0.45, L - 0.03, z), V(sh * 0.92, L - 0.06, z)]);
-  addMesh(group, new THREE.TubeGeometry(bar, 48, 0.008, 10), wood);
+  const metal = new THREE.MeshPhysicalMaterial({ color: 0xd4d8de, metalness: 1, roughness: 0.18 });
+  const wood = new THREE.MeshPhysicalMaterial({ color: 0x9a6438, roughness: 0.5, clearcoat: 0.6, clearcoatRoughness: 0.25 });
+  // centred in the neck opening (the neck rings are pushed slightly to the back)
+  const zc = -0.01;
+  const thick = 0.011;
+
+  // --- wooden body (profile in the XY plane, extruded along z) ---
+  const half = Math.min(sh * 0.86, 0.22);
+  const topC = L - 0.017; // top of the body at the centre, just under the collar
+  const flat = Math.min(0.035, neckR * 0.4); // flat top around the hook ferrule
+  const topY = (x: number) => {
+    const d = Math.max(0, Math.abs(x) - flat);
+    // gentle shoulder slope that ends ~5 cm below the neck, like the shirt's shoulder seam
+    return topC - 0.2 * d - 0.35 * d * d;
+  };
+  const depthAt = (x: number) => 0.036 - 0.014 * (Math.abs(x) / half); // taller in the middle
+  const shape = new THREE.Shape();
+  const n = 24;
+  const endR = depthAt(half) / 2;
+  shape.moveTo(-half, topY(-half));
+  for (let i = 1; i <= n; i++) {
+    const x = -half + (2 * half * i) / n;
+    shape.lineTo(x, topY(x));
+  }
+  // rounded right end
+  shape.quadraticCurveTo(half + endR * 1.1, topY(half) - endR, half, topY(half) - depthAt(half));
+  for (let i = n - 1; i >= 0; i--) {
+    const x = -half + (2 * half * i) / n;
+    // taller in the middle, so the underside is flatter than the top
+    shape.lineTo(x, topY(x) - depthAt(x));
+  }
+  shape.quadraticCurveTo(-half - endR * 1.1, topY(-half) - endR, -half, topY(-half));
+  const bevel = 0.0025;
+  const bodyGeo = new THREE.ExtrudeGeometry(shape, {
+    depth: thick - 2 * bevel,
+    bevelEnabled: true,
+    bevelThickness: bevel,
+    bevelSize: bevel,
+    bevelSegments: 3,
+    curveSegments: 12,
+  });
+  bodyGeo.translate(0, 0, zc - (thick - 2 * bevel) / 2);
+  bodyGeo.computeVertexNormals();
+  addMesh(group, bodyGeo, wood);
+
+  // --- chrome ferrule where the hook enters the wood ---
+  const ferrule = new THREE.CylinderGeometry(0.0048, 0.0058, 0.012, 16);
+  addMesh(group, ferrule, metal).position.set(0, topC + 0.005, zc);
+
+  // --- hook: straight stem, then a "?" curl over to one side ending in a ball tip ---
+  const wire = 0.0026;
+  const R = 0.026;
+  const stemTop = L + 0.045;
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i <= 8; i++) pts.push(V(0, topC + ((stemTop - topC) * i) / 8, zc));
+  const endA = Math.PI * 1.22;
+  for (let i = 1; i <= 40; i++) {
+    const a = (endA * i) / 40;
+    pts.push(V(-R + R * Math.cos(a), stemTop + R * Math.sin(a), zc));
+  }
+  const hookCurve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+  addMesh(group, new THREE.TubeGeometry(hookCurve, 96, wire, 12), metal);
+  const tip = pts[pts.length - 1];
+  addMesh(group, new THREE.SphereGeometry(wire * 1.35, 16, 12), metal).position.copy(tip);
 }
 
 /**
