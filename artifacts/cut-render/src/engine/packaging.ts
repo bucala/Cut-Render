@@ -551,6 +551,12 @@ function boardMaterials(materialId: string, color?: string | null): THREE.Materi
   const edge = createPhysicalMaterial(corrugated ? 'kraft-corrugated' : 'sbs-board', null, 0.001);
   edge.roughness = 0.95;
   if (corrugated) edge.color.multiplyScalar(0.85);
+  // Panels are closed slabs only ~1 mm thick: drawing back faces makes the inner (kraft) face
+  // fight the outer face for depth, which shows up as stripes and blocks on mobile GPUs.
+  for (const m of [outside, inside, edge]) {
+    m.side = THREE.FrontSide;
+    m.shadowSide = THREE.BackSide;
+  }
   return [outside, inside, edge];
 }
 

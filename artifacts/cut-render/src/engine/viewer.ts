@@ -416,8 +416,9 @@ export class Viewer {
     const dir = new THREE.Vector3(0.9, 0.62, 1.25).normalize();
     this.controls.target.copy(sphere.center);
     this.camera.position.copy(sphere.center).addScaledVector(dir, dist);
-    this.camera.near = Math.max(dist / 200, 0.0005);
-    this.camera.far = dist * 200;
+    // a tight near/far range keeps depth precision high enough for thin board on 16-bit depth buffers
+    this.camera.near = Math.max(Math.min(dist / 40, r * 0.1), 0.0005);
+    this.camera.far = dist * 60;
     this.camera.updateProjectionMatrix();
     this.controls.minDistance = r * 0.3;
     this.controls.maxDistance = dist * 6;
