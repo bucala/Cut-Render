@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { CutPlan, PlanLabel, PlanPath, PlanPiece, Point } from './types';
 import { bezier, boundsOf, centroid, mirrorX, pieceColor, polygonArea, polylineLength, rotatePoints, translatePoints } from './geom';
 import { createPhysicalMaterial } from './materials';
-import { distToSegs, meshRegion, pointInPolygon, roundProfile, segsOf, smoothstep, type RegionMesh } from './garmentMesh';
+import { cavityShade, distToSegs, meshRegion, pointInPolygon, roundProfile, segsOf, smoothstep, type RegionMesh } from './garmentMesh';
 import { createInkMaterial, createPanelTexture, type ArtworkLayer, type PanelId, type PanelTexture, type PrintPanel } from './artwork';
 
 export type GarmentId = 'tshirt' | 'hoodie' | 'trousers' | 'skirt' | 'tote';
@@ -851,7 +851,7 @@ export function garmentInfo(params: GarmentParams): Record<string, string> {
 }
 
 // ---------------------------------------------------------------------------
-// 3D garment (ghost-mannequin style shell)
+// 3D garment: flat-lay shells lifted straight from the drafted pattern
 // ---------------------------------------------------------------------------
 
 export interface GarmentObjectOptions {
@@ -867,145 +867,6 @@ export interface GarmentObjectOptions {
 /** Wrinkle multiplier for the garment currently being built (set by buildGarmentObject). */
 let FOLD_K = 1;
 
-/** A tube surface that carries a printable panel. */
-interface PrintSurface {
-  panel: PanelId;
-  geo: THREE.BufferGeometry;
-  /** column whose arc position maps to panel x = xOffset */
-  refCol: number;
-  /** panel y (mm) for a row / vertex */
-  mapY: (row: number, pos: THREE.Vector3) => number;
-  xOffset?: number;
-}
-
-interface Ring {
-  c: THREE.Vector3;
-  u: THREE.Vector3;
-  v: THREE.Vector3;
-  a: number;
-  b: number;
-  /** fold amplitude in metres */
-  fold?: number;
-  /** squareness 0 = ellipse, 1 = rounded rectangle */
-  square?: number;
-}
-
-function ringPoint(r: Ring, theta: number, t: number, seed: number): THREE.Vector3 {
-  let cx = Math.cos(theta);
-  let sy = Math.sin(theta);
-  if (r.square) {
-    const e = 1 - r.square * 0.8;
-    cx = Math.sign(cx) * Math.pow(Math.abs(cx), e);
-    sy = Math.sign(sy) * Math.pow(Math.abs(sy), e);
-  }
-  const fold = (r.fold ?? 0) * FOLD_K;
-  const d = fold * (0.6 * Math.sin(5 * theta + seed + t * 9) + 0.4 * Math.sin(11 * theta + 2.1 * seed + t * 17));
-  const k = 1 + d / Math.max(0.02, (r.a + r.b) / 2);
-  return r.c.clone().addScaledVector(r.u, r.a * cx * k).addScaledVector(r.v, r.b * sy * k);
-}
-
-function tubeGeometry(rings: Ring[], segs = 64, seed = 0): THREE.BufferGeometry {
-  const pos: number[] = [];
-  const uv: number[] = [];
-  const idx: number[] = [];
-  let dist = 0;
-  let prevCenter = rings[0].c;
-  const sub = 3;
-  const dense: Ring[] = [];
-  for (let i = 0; i < rings.length - 1; i++) {
-    const r0 = rings[i];
-    const r1 = rings[i + 1];
-    for (let s = 0; s < sub; s++) {
-      const t = s / sub;
-      const ss = t * t * (3 - 2 * t) * 0.35 + t * 0.65;
-      dense.push({
-        c: r0.c.clone().lerp(r1.c, ss),
-        u: r0.u.clone().lerp(r1.u, ss).normalize(),
-        v: r0.v.clone().lerp(r1.v, ss).normalize(),
-        a: r0.a + (r1.a - r0.a) * ss,
-        b: r0.b + (r1.b - r0.b) * ss,
-        fold: (r0.fold ?? 0) + ((r1.fold ?? 0) - (r0.fold ?? 0)) * ss,
-        square: (r0.square ?? 0) + ((r1.square ?? 0) - (r0.square ?? 0)) * ss,
-      });
-    }
-  }
-  dense.push(rings[rings.length - 1]);
-  dense.forEach((r, i) => {
-    dist += r.c.distanceTo(prevCenter);
-    prevCenter = r.c;
-    const perim = Math.PI * (3 * (r.a + r.b) - Math.sqrt((3 * r.a + r.b) * (r.a + 3 * r.b)));
-    const t = i / (dense.length - 1);
-    for (let j = 0; j <= segs; j++) {
-      const th = (j / segs) * Math.PI * 2;
-      const p = ringPoint(r, th, t, seed);
-      pos.push(p.x, p.y, p.z);
-      uv.push((j / segs) * perim, dist);
-    }
-  });
-  const row = segs + 1;
-  for (let i = 0; i < dense.length - 1; i++) {
-    for (let j = 0; j < segs; j++) {
-      const a = i * row + j;
-      const b = a + 1;
-      const c = a + row;
-      const d = c + 1;
-      idx.push(a, c, b, b, c, d);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  const dists: number[] = [];
-  {
-    let acc = 0;
-    let prev = dense[0].c;
-    for (const r of dense) {
-      acc += r.c.distanceTo(prev);
-      prev = r.c;
-      dists.push(acc);
-    }
-  }
-  g.userData.tube = { rows: dense.length, segs, dist: dists };
-  // weld the seam normals (first/last column share position)
-  const n = g.getAttribute('normal') as THREE.BufferAttribute;
-  for (let i = 0; i < dense.length; i++) {
-    const a = i * row;
-    const b = a + segs;
-    const nx = n.getX(a) + n.getX(b);
-    const ny = n.getY(a) + n.getY(b);
-    const nz = n.getZ(a) + n.getZ(b);
-    const l = Math.hypot(nx, ny, nz) || 1;
-    n.setXYZ(a, nx / l, ny / l, nz / l);
-    n.setXYZ(b, nx / l, ny / l, nz / l);
-  }
-  return g;
-}
-
-const X = new THREE.Vector3(1, 0, 0);
-const Z = new THREE.Vector3(0, 0, 1);
-const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
-
-function hRing(y: number, a: number, b: number, fold = 0.002, zOff = 0, xOff = 0): Ring {
-  return { c: V(xOff, y, zOff), u: X.clone(), v: Z.clone(), a, b, fold };
-}
-
-function ellipseFromCirc(circMm: number, aspect = 1.45): [number, number] {
-  const c = circMm / 1000;
-  // perimeter ≈ π (a + b) roughly; choose b = a / aspect
-  const a = c / (Math.PI * (1 + 1 / aspect));
-  return [a, a / aspect];
-}
-
-function addMesh(group: THREE.Group, geo: THREE.BufferGeometry, mat: THREE.Material) {
-  const m = new THREE.Mesh(geo, mat);
-  m.castShadow = true;
-  m.receiveShadow = true;
-  group.add(m);
-  return m;
-}
-
 /** Print surface on a pattern-built mesh: every vertex carries its panel coordinates (mm). */
 interface MeshPrintSurface {
   panel: PanelId;
@@ -1015,6 +876,189 @@ interface MeshPrintSurface {
   /** triangles (vertex indices) that belong to this panel */
   tris: number[];
 }
+
+const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+
+function addMesh(group: THREE.Group, geo: THREE.BufferGeometry, mat: THREE.Material) {
+  if (!geo.getAttribute('color')) {
+    // the fabric material uses baked vertex shading; parts without it are plain white
+    // (RGBA: the path tracer merges 3-component colour attributes incorrectly)
+    const n = geo.getAttribute('position').count;
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 4).fill(1), 4));
+  }
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  group.add(m);
+  return m;
+}
+
+/**
+ * A garment shell is described in the drafting frame (mm, y down): the flat silhouette of the
+ * sewn pieces, the seams where the front and back layers meet (closed, z = 0) and the seams
+ * that only leave a crease. Everything else (hem, neckline, cuffs) stays open.
+ */
+interface ShellSpec {
+  outline: Point[];
+  constraints: Point[][];
+  closed: SegList;
+  creases: SegList;
+  /** half thickness of the hanging garment (mm) */
+  depth: number;
+  /** width of the rounded roll at the closed seams (mm) */
+  roll: number;
+  /** position-dependent depth multiplier */
+  profile: (q: Point) => number;
+  /** wrinkle displacement (mm, already excluding FOLD_K) */
+  fold: (q: Point, back: boolean) => number;
+  /** world y (mm) of pattern y = 0 */
+  topW: number;
+  step?: number;
+}
+
+interface ShellLayer {
+  mesh: RegionMesh;
+  z: Float32Array;
+  geo: THREE.BufferGeometry;
+}
+
+type SegList = Float64Array;
+
+/** unsigned distance of a layer from the mid-plane (mm) */
+function shellDepth(s: ShellSpec, q: Point, back: boolean): number {
+  const d = distToSegs(q.x, q.y, s.closed);
+  let z = s.depth * s.profile(q) * roundProfile(d / s.roll);
+  if (s.creases.length) z *= 1 - 0.12 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 7) ** 2));
+  return z + s.fold(q, back) * FOLD_K * smoothstep(0, 45, d);
+}
+
+function shellWorld(s: ShellSpec, q: Point, z: number): THREE.Vector3 {
+  return V(q.x / 1000, (s.topW - q.y) / 1000, z / 1000);
+}
+
+/** Orient triangles so the layer faces outward (+z front, -z back). */
+function orientTris(pts: Point[], tris: number[], back: boolean) {
+  for (let k = 0; k < tris.length; k += 3) {
+    const a = pts[tris[k]];
+    const b = pts[tris[k + 1]];
+    const c = pts[tris[k + 2]];
+    // world y = -pattern y, so a positive pattern-space area is clockwise in world space
+    const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if ((area > 0) !== back) {
+      const tmp = tris[k + 1];
+      tris[k + 1] = tris[k + 2];
+      tris[k + 2] = tmp;
+    }
+  }
+}
+
+function buildShellLayer(group: THREE.Group, s: ShellSpec, back: boolean, mat: THREE.Material): ShellLayer {
+  const mesh = meshRegion(s.outline, s.constraints, s.step ?? 10);
+  const n = mesh.pts.length;
+  const z = new Float32Array(n);
+  const pos = new Float32Array(n * 3);
+  const uv = new Float32Array(n * 2);
+  const sgn = back ? -1 : 1;
+  mesh.pts.forEach((q, i) => {
+    z[i] = sgn * shellDepth(s, q, back);
+    const v = shellWorld(s, q, z[i]);
+    pos[i * 3] = v.x;
+    pos[i * 3 + 1] = v.y;
+    pos[i * 3 + 2] = v.z;
+    uv[i * 2] = q.x / 1000;
+    uv[i * 2 + 1] = -q.y / 1000;
+  });
+  orientTris(mesh.pts, mesh.tris, back);
+  const shade = cavityShade(mesh, z, sgn, 0.55);
+  const col = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    col[i * 4] = col[i * 4 + 1] = col[i * 4 + 2] = shade[i];
+    col[i * 4 + 3] = 1;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  geo.setIndex(mesh.tris);
+  geo.computeVertexNormals();
+  addMesh(group, geo, mat);
+  return { mesh, z, geo };
+}
+
+/** Mesh a region with given world positions (hood, pocket); outward = -z when `back`. */
+function patchGeometry(m: RegionMesh, pos: number[], back: boolean): THREE.BufferGeometry {
+  const tris = [...m.tris];
+  orientTris(m.pts, tris, back);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(m.pts.flatMap((q) => [q.x / 1000, -q.y / 1000]), 2));
+  g.setIndex(tris);
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * Folded rib band around a closed opening (neckline, waist): rises from the seam, rolls over
+ * at the top edge and comes back down on the inside.
+ */
+function ribBand(loop: THREE.Vector3[], height: number, tilt: number): THREE.BufferGeometry {
+  const prof: [number, number][] = [
+    [0, 0], [0.45, 0], [0.8, 0.0003], [0.96, 0.0011], [1, 0.0022], [0.95, 0.0033], [0.7, 0.0038], [0, 0.0038],
+  ];
+  const n = loop.length;
+  const cols = prof.length;
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const C = loop.reduce((a, p) => a.add(p), V(0, 0, 0)).multiplyScalar(1 / n);
+  let run = 0;
+  for (let i = 0; i <= n; i++) {
+    const P = loop[i % n];
+    if (i > 0) run += P.distanceTo(loop[i - 1]);
+    // the band leans toward the middle of the opening, so it forms a ring that narrows upward
+    const T = loop[(i + 1) % n].clone().sub(loop[(i + n - 1) % n]).normalize();
+    const m = C.clone().sub(P);
+    m.addScaledVector(T, -m.dot(T));
+    if (m.lengthSq() < 1e-10) m.set(0, 0, -1);
+    m.normalize();
+    const up = V(0, 1, 0).addScaledVector(m, tilt).normalize();
+    for (const [s, r] of prof) {
+      pos.push(P.x + up.x * s * height + m.x * r, P.y + up.y * s * height + m.y * r, P.z + up.z * s * height + m.z * r);
+      uv.push(run, s * height);
+    }
+  }
+  const idx: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < cols - 1; j++) {
+      const a = i * cols + j;
+      const b = a + 1;
+      const c = a + cols;
+      const d = c + 1;
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Closed opening loop: front edge on the front layer, back edge on the back layer. */
+function openingLoop(s: ShellSpec, frontEdge: Point[], backEdge: Point[]): THREE.Vector3[] {
+  const loop: THREE.Vector3[] = [];
+  for (const q of frontEdge) loop.push(shellWorld(s, q, shellDepth(s, q, false)));
+  for (const q of rev(backEdge).slice(1, -1)) loop.push(shellWorld(s, q, -shellDepth(s, q, true)));
+  return loop;
+}
+
+function closeLoop(pts: Point[]): Point[] {
+  const f = pts[0];
+  const l = pts[pts.length - 1];
+  return Math.hypot(f.x - l.x, f.y - l.y) < 1e-6 ? pts.slice(0, -1) : pts;
+}
+
+const mirP = (q: Point): Point => ({ x: -q.x, y: q.y });
 
 const REGION_BODY = 0;
 const REGION_SLEEVE_POS = 1; // world +x: the wearer's left sleeve
@@ -1032,6 +1076,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const M = measures(p);
   const hemBand = hoodie ? 60 : 0;
   const cuffH = hoodie ? 70 : 0;
+  const longSleeve = hoodie || p.sleeve === 'long';
   const t = draftTop(M, {
     extraEase: hoodie ? 60 : 0,
     lengthExtra: hoodie ? 40 : 0,
@@ -1054,7 +1099,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const ad = UP.y;
   const hemY = corner.y;
   const yBot = hemY + hemBand + 8;
-  const mirP = (q: Point): Point => ({ x: -q.x, y: q.y });
+  const W = corner.x * 2;
 
   // ---- sleeve placement: half the sleeve piece (front layer), folded along its centre line ----
   const seamS = t.sleeve.edges[1].pts;
@@ -1064,10 +1109,10 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const sLen = seamS[1].y;
   const cuffHalf = hw2 * 0.82;
   const sEnd = sLen + cuffH;
-  // orient the sleeve so its cap chord (top -> underarm) lies along the armhole chord SP -> UP
+  // natural pose: the cap chord (top -> underarm) lies along the armhole chord SP -> UP
   const chordL = Math.hypot(UP.x - SP.x, UP.y - SP.y);
-  const ux = (UP.x - SP.x) / chordL;
-  const uy = (UP.y - SP.y) / chordL;
+  let ux = (UP.x - SP.x) / chordL;
+  let uy = (UP.y - SP.y) / chordL;
   const capL = Math.hypot(bw2, ch);
   const cosL = bw2 / capL;
   const sinL = ch / capL;
@@ -1077,6 +1122,13 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     wx = -wx;
     wy = -wy;
   }
+  // on a hanger the sleeves hang lower than in the flat lay: pivot about the shoulder point
+  const poseAngle = (longSleeve ? 46 : 30) * (Math.PI / 180);
+  const natural = Math.atan2(sinL * uy + cosL * wy, sinL * ux + cosL * wx);
+  const rot = Math.max(0, poseAngle - natural);
+  const rotate = (x: number, y: number): [number, number] => [x * Math.cos(rot) - y * Math.sin(rot), x * Math.sin(rot) + y * Math.cos(rot)];
+  [ux, uy] = rotate(ux, uy);
+  [wx, wy] = rotate(wx, wy);
   const dX = sinL * ux + cosL * wx; // along the sleeve (cap -> hem)
   const dY = sinL * uy + cosL * wy;
   const nX = cosL * ux - sinL * wx; // across the sleeve (fold -> underarm seam)
@@ -1128,11 +1180,6 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const bandSideR: Point[] = [corner, { x: bandHalf, y: hemY + hemBand }];
   const bottom: Point[] = hemBand ? [corner, { x: bandHalf, y: hemY + hemBand }, { x: 0, y: hemY + hemBand }, { x: -bandHalf, y: hemY + hemBand }, mirP(corner)] : hemPts;
 
-  const closeLoop = (pts: Point[]) => {
-    const f = pts[0];
-    const l = pts[pts.length - 1];
-    return Math.hypot(f.x - l.x, f.y - l.y) < 1e-6 ? pts.slice(0, -1) : pts;
-  };
   const outlineFor = (neck: Point[]) =>
     closeLoop(concat(neck, shoulderR, sleeveOut, sideR, bottom, mir(rev(sideR)), rev(sleeveOut).map(mirP), mir(rev(shoulderR))));
   const bodyPolyFor = (neck: Point[]) => closeLoop(concat(neck, shoulderR, armR, sideR, hemPts, mir(rev(sideR)), mir(rev(armR)), mir(rev(shoulderR))));
@@ -1142,68 +1189,53 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   if (hemBand) constraints.push(hemPts);
   if (cuffH) constraints.push(sleeveHemR, mir(sleeveHemR));
 
-  // ---- depth of the two layers ----
-  const closedSegs = segsOf([
-    shoulderR, mir(shoulderR), foldR, mir(foldR), underR, mir(underR), sideR, mir(sideR),
-    ...(hemBand ? [bandSideR, mir(bandSideR)] : []),
-  ]);
-  const creaseSegs = segsOf(constraints);
-  const H = hoodie ? 34 : 28; // half depth of the body on the hanger (mm)
-  const RD = 70; // width of the rounded roll at the closed seams (mm)
+  // ---- shape of the two layers ----
   const sleeveLocal = (q: Point): [number, number] => unwarp(q.x >= 0 ? q : mirP(q));
-  /** distance of a layer from the mid-plane, in mm (front: +z, back: -z) */
-  const depth = (q: Point, back: boolean, inBody: boolean): number => {
-    const d = distToSegs(q.x, q.y, closedSegs);
-    const ty = Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad)));
-    let z = H * (1 - 0.25 * ty) * roundProfile(d / RD);
-    z *= 1 - 0.12 * Math.exp(-((distToSegs(q.x, q.y, creaseSegs) / 7) ** 2));
-    let fold: number;
-    if (inBody) {
-      const ph = back ? 1.7 : 0;
-      const w = 0.6 * Math.sin((2 * Math.PI * q.x) / 170 + 0.8 + ph + q.y * 0.002) + 0.4 * Math.sin((2 * Math.PI * q.x) / 83 + 2.1 + ph * 1.3 + q.y * 0.004);
-      fold = w * 3.4 * (0.15 + 0.85 * smoothstep(ad * 0.7, yBot, q.y));
-    } else {
+  const bodyPolyF = bodyPolyFor(neckF);
+  const bodyPolyB = bodyPolyFor(neckB);
+  const tension = [-1, 1].map((s) => segsOf([[{ x: s * UP.x, y: UP.y }, { x: s * 0.2 * W, y: yBot }]]));
+  const spec: ShellSpec = {
+    outline: [],
+    constraints,
+    closed: segsOf([
+      shoulderR, mir(shoulderR), foldR, mir(foldR), underR, mir(underR), sideR, mir(sideR),
+      ...(hemBand ? [bandSideR, mir(bandSideR)] : []),
+    ]),
+    creases: segsOf(constraints),
+    depth: hoodie ? 34 : 28,
+    roll: 70,
+    profile: (q) => 1 - 0.25 * Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad))),
+    fold: (q, back) => {
+      const inBody = pointInPolygon(q.x, q.y, back ? bodyPolyB : bodyPolyF);
+      if (inBody) {
+        const ph = back ? 1.7 : 0;
+        const tt = smoothstep(ad * 0.6, yBot, q.y);
+        let w =
+          0.55 * Math.sin((2 * Math.PI * q.x) / (0.42 * W) + 0.8 + ph + q.y * 0.0025) +
+          0.3 * Math.sin((2 * Math.PI * q.x) / (0.21 * W) + 2.1 + 1.3 * ph + q.y * 0.004) +
+          0.15 * Math.sin((2 * Math.PI * q.x) / (0.11 * W) + 4.2 + ph);
+        w *= 1.2 + 4.3 * tt;
+        // soft tension folds running from the underarm toward the hem
+        for (const seg of tension) w += 2.2 * Math.exp(-((distToSegs(q.x, q.y, seg) / 28) ** 2)) * smoothstep(0, 120, q.y - ad) * (1 - 0.5 * tt);
+        return w;
+      }
       const [xl, yl] = sleeveLocal(q);
-      fold = Math.sin(yl / 26 + (back ? 1.1 : 0) + xl * 0.012) * 1.6 * smoothstep(ch * 0.5, sLen, yl);
-    }
-    return z + fold * FOLD_K * smoothstep(0, 45, d);
+      return Math.sin(yl / 26 + (back ? 1.1 : 0) + xl * 0.012) * 2 * smoothstep(ch * 0.5, sLen, yl);
+    },
+    topW: yBot + 10,
   };
-
-  const topW = yBot + 10; // world y (mm) of the pattern origin (high shoulder point)
-  const toWorld = (q: Point, z: number) => V(q.x / 1000, (topW - q.y) / 1000, z / 1000);
   const surfaces: MeshPrintSurface[] = [];
 
   const makeLayer = (neck: Point[], back: boolean) => {
-    const outline = outlineFor(neck);
-    const mesh = meshRegion(outline, constraints, 10);
-    const bodyPoly = bodyPolyFor(neck);
-    const n = mesh.pts.length;
-    const pos = new Float32Array(n * 3);
-    const uv = new Float32Array(n * 2);
-    const sgn = back ? -1 : 1;
-    mesh.pts.forEach((q, i) => {
-      const z = sgn * depth(q, back, pointInPolygon(q.x, q.y, bodyPoly));
-      const v = toWorld(q, z);
-      pos[i * 3] = v.x;
-      pos[i * 3 + 1] = v.y;
-      pos[i * 3 + 2] = v.z;
-      uv[i * 2] = q.x / 1000;
-      uv[i * 2 + 1] = -q.y / 1000;
-    });
-    // orient every triangle outward (front faces +z, back faces -z) and sort them by panel
-    const tris = mesh.tris;
+    const layer = buildShellLayer(group, { ...spec, outline: outlineFor(neck) }, back, mat);
+    const { pts, tris } = layer.mesh;
+    const n = pts.length;
+    const bodyPoly = back ? bodyPolyB : bodyPolyF;
     const region: number[] = [];
     for (let k = 0; k < tris.length; k += 3) {
-      const a = mesh.pts[tris[k]];
-      const b = mesh.pts[tris[k + 1]];
-      const c = mesh.pts[tris[k + 2]];
-      // world y = -pattern y, so a positive pattern-space area means clockwise in world space
-      const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-      if ((area > 0) !== back) {
-        const tmp = tris[k + 1];
-        tris[k + 1] = tris[k + 2];
-        tris[k + 2] = tmp;
-      }
+      const a = pts[tris[k]];
+      const b = pts[tris[k + 1]];
+      const c = pts[tris[k + 2]];
       const cx = (a.x + b.x + c.x) / 3;
       const cy = (a.y + b.y + c.y) / 3;
       let r = REGION_BODY;
@@ -1216,14 +1248,6 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
       }
       region.push(r);
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    geo.setIndex(tris);
-    geo.computeVertexNormals();
-    addMesh(group, geo, mat);
-
-    // panel coordinates for the printed artwork
     const pick = (want: number) => {
       const out: number[] = [];
       region.forEach((r, k) => {
@@ -1233,11 +1257,11 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     };
     const bx = new Float32Array(n);
     const by = new Float32Array(n);
-    mesh.pts.forEach((q, i) => {
+    pts.forEach((q, i) => {
       bx[i] = back ? -q.x : q.x;
       by[i] = q.y;
     });
-    surfaces.push({ panel: back ? 'back' : 'front', geo, px: bx, py: by, tris: pick(REGION_BODY) });
+    surfaces.push({ panel: back ? 'back' : 'front', geo: layer.geo, px: bx, py: by, tris: pick(REGION_BODY) });
     for (const [want, panel] of [[REGION_SLEEVE_POS, 'sleeveL'], [REGION_SLEEVE_NEG, 'sleeveR']] as const) {
       const tr = pick(want);
       if (!tr.length) continue;
@@ -1246,21 +1270,29 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
       // sleeve pieces are seen from the outside: keep the artwork readable on both layers
       const flip = (want === REGION_SLEEVE_POS) !== back ? -1 : 1;
       for (const i of new Set(tr)) {
-        const [xl, yl] = sleeveLocal(mesh.pts[i]);
+        const [xl, yl] = sleeveLocal(pts[i]);
         sx[i] = flip * xl;
         sy[i] = yl;
       }
-      surfaces.push({ panel, geo, px: sx, py: sy, tris: tr });
+      surfaces.push({ panel, geo: layer.geo, px: sx, py: sy, tris: tr });
     }
   };
   makeLayer(neckF, false);
   makeLayer(neckB, true);
 
   // ---- neckline: rib band (T-shirt) or the rim where the hood is sewn in (hoodie) ----
-  const loop: THREE.Vector3[] = [];
-  for (const q of neckF) loop.push(toWorld(q, depth(q, false, true)));
-  for (const q of rev(neckB).slice(1, -1)) loop.push(toWorld(q, -depth(q, true, true)));
-  addMesh(group, neckBand(loop, hoodie ? 0.032 : 0.022, hoodie ? 0.4 : 0.16), mat);
+  addMesh(group, ribBand(openingLoop(spec, neckF, neckB), hoodie ? 0.032 : 0.022, hoodie ? 1.1 : 0.8), mat);
+  const depthAt = (q: Point, back: boolean) => shellDepth(spec, q, back);
+  const toWorld = (q: Point, z: number) => shellWorld(spec, q, z);
+
+  if (!hoodie) {
+    // woven size label inside the back neck
+    const ly = neckB[Math.floor(neckB.length / 2)].y + 12;
+    const label = new THREE.PlaneGeometry(0.036, 0.012);
+    const lm = addMesh(group, label, new THREE.MeshPhysicalMaterial({ color: 0xf4f1ea, roughness: 0.85 }));
+    lm.position.copy(toWorld({ x: 0, y: ly }, -depthAt({ x: 0, y: ly }, true) + 1.2));
+    lm.castShadow = false;
+  }
 
   if (hoodie) {
     const k = M.m.chest / 980;
@@ -1281,10 +1313,10 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const hpos: number[] = [];
     for (const q of hm.pts) {
       const lift = 22 * roundProfile(distToSegs(q.x, q.y, hoodEdge) / 45) * (1 - 0.2 * Math.exp(-((q.x / 8) ** 2)));
-      const v = toWorld(q, -depth(q, true, true) - 3 - lift);
+      const v = toWorld(q, -depthAt(q, true) - 3 - lift);
       hpos.push(v.x, v.y, v.z);
     }
-    addMesh(group, layerGeometry(hm, hpos, true), mat);
+    addMesh(group, patchGeometry(hm, hpos, true), mat);
 
     // kangaroo pocket stitched onto the front, open along the slanted edges
     const pw = 360 * k;
@@ -1298,10 +1330,10 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const pm = meshRegion(P, [], 9);
     const ppos: number[] = [];
     for (const q of pm.pts) {
-      const v = toWorld(q, depth(q, false, true) + 1.2 + 2.6 * roundProfile(distToSegs(q.x, q.y, pocketSewn) / 12));
+      const v = toWorld(q, depthAt(q, false) + 1.2 + 2.6 * roundProfile(distToSegs(q.x, q.y, pocketSewn) / 12));
       ppos.push(v.x, v.y, v.z);
     }
-    addMesh(group, layerGeometry(pm, ppos, false), mat);
+    addMesh(group, patchGeometry(pm, ppos, false), mat);
 
     // drawcords hanging from the hood rim
     const cordMat = new THREE.MeshPhysicalMaterial({ color: 0xf5f5f0, roughness: 0.7, sheen: 1, sheenRoughness: 0.5 });
@@ -1309,7 +1341,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     for (const s of [-1, 1]) {
       const pts = [0, 0.35, 0.7, 1].map((f) => {
         const q = { x: s * (32 + f * 8), y: neckDepth - 8 + f * 230 };
-        return toWorld(q, depth(q, false, true) + 4 + (pointInPolygon(q.x, q.y, P) ? 3.8 : 0));
+        return toWorld(q, depthAt(q, false) + 4 + (pointInPolygon(q.x, q.y, P) ? 3.8 : 0));
       });
       addMesh(group, new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, 0.0032, 8), cordMat);
       const tip = new THREE.CylinderGeometry(0.0036, 0.0036, 0.022, 10);
@@ -1319,138 +1351,212 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
 
   if (hanger) {
     const slope = (SP.y - shoulderR[0].y) / (SP.x - nw);
-    addHanger(group, topW / 1000, nw / 1000, SP.x / 1000, slope);
+    addHanger(group, spec.topW / 1000, nw / 1000, SP.x / 1000, slope);
   }
   return surfaces;
 }
 
-/** Mesh a meshRegion result with given world positions; outward = -z when `back`. */
-function layerGeometry(m: RegionMesh, pos: number[], back: boolean): THREE.BufferGeometry {
-  const tris = [...m.tris];
-  for (let k = 0; k < tris.length; k += 3) {
-    const a = m.pts[tris[k]];
-    const b = m.pts[tris[k + 1]];
-    const c = m.pts[tris[k + 2]];
-    const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-    if ((area > 0) !== back) {
-      const tmp = tris[k + 1];
-      tris[k + 1] = tris[k + 2];
-      tris[k + 2] = tmp;
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(m.pts.flatMap((q) => [q.x / 1000, -q.y / 1000]), 2));
-  g.setIndex(tris);
-  g.computeVertexNormals();
-  return g;
-}
-
 /**
- * Folded rib band around a closed neckline loop: rises from the seam, rolls over at the top
- * edge and comes back down on the inside.
- */
-function neckBand(loop: THREE.Vector3[], height: number, tilt: number): THREE.BufferGeometry {
-  const prof: [number, number][] = [
-    [0, 0], [0.45, 0], [0.8, 0.0003], [0.96, 0.0011], [1, 0.0022], [0.95, 0.0033], [0.7, 0.0038], [0, 0.0038],
-  ];
-  const n = loop.length;
-  const cols = prof.length;
-  const pos: number[] = [];
-  const uv: number[] = [];
-  let run = 0;
-  for (let i = 0; i <= n; i++) {
-    const P = loop[i % n];
-    if (i > 0) run += P.distanceTo(loop[i - 1]);
-    const m = V(-P.x, 0, -P.z);
-    if (m.lengthSq() < 1e-10) m.set(0, 0, -1);
-    m.normalize();
-    const up = V(0, 1, 0).addScaledVector(m, tilt).normalize();
-    for (const [s, r] of prof) {
-      pos.push(P.x + up.x * s * height + m.x * r, P.y + up.y * s * height + m.y * r, P.z + up.z * s * height + m.z * r);
-      uv.push(run, s * height);
-    }
-  }
-  const idx: number[] = [];
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < cols - 1; j++) {
-      const a = i * cols + j;
-      const b = a + 1;
-      const c = a + cols;
-      const d = c + 1;
-      idx.push(a, b, c, b, d, c);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  return g;
-}
-
-/**
- * Wooden clothes hanger: a flat, lacquered body following the shoulder slope just under the
- * shoulder seams, and a chrome "?" hook in the same plane rising out of the neck opening
- * (as on a real hanger, the hook and the body are coplanar).
+ * Wooden clothes hanger in the style of a classic shaped shop hanger: white lacquered,
+ * gently arched shoulder arms following the shoulder seams, a birch centre block carrying
+ * the chrome hook, and a birch trouser bar between the arm tips. Everything is coplanar.
  */
 function addHanger(group: THREE.Group, hpsY: number, nw: number, sh: number, slope: number) {
-  const metal = new THREE.MeshPhysicalMaterial({ color: 0xd4d8de, metalness: 1, roughness: 0.18 });
-  const wood = new THREE.MeshPhysicalMaterial({ color: 0x9a6438, roughness: 0.5, clearcoat: 0.6, clearcoatRoughness: 0.25 });
-  const zc = 0;
-  const thick = 0.011;
+  const chrome = new THREE.MeshPhysicalMaterial({ color: 0xd8dce2, metalness: 1, roughness: 0.16 });
+  const lacquer = new THREE.MeshPhysicalMaterial({ color: 0xf3f1ec, roughness: 0.32, clearcoat: 0.7, clearcoatRoughness: 0.2 });
+  const birch = new THREE.MeshPhysicalMaterial({ color: 0xdcc6a2, roughness: 0.55, clearcoat: 0.25, clearcoatRoughness: 0.4 });
+  const thick = 0.013;
+  const bevel = 0.003;
+  const extrude = (shape: THREE.Shape) => {
+    const g = new THREE.ExtrudeGeometry(shape, { depth: thick - 2 * bevel, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 3, curveSegments: 12 });
+    g.translate(0, 0, -(thick - 2 * bevel) / 2);
+    g.computeVertexNormals();
+    return g;
+  };
 
-  // --- wooden body (profile in the XY plane, extruded along z) ---
-  const half = sh - 0.025;
-  const topC = hpsY - 0.007; // just under the high shoulder point
-  const topY = (x: number) => topC - slope * Math.max(0, Math.abs(x) - nw);
-  const depthAt = (x: number) => 0.036 - 0.014 * (Math.abs(x) / half); // taller in the middle
-  const shape = new THREE.Shape();
-  const n = 24;
-  const endR = depthAt(half) / 2;
-  shape.moveTo(-half, topY(-half));
+  // --- arched arms: top edge just under the shoulder seam, sagging a little toward the tips ---
+  const half = Math.min(sh - 0.028, 0.225);
+  const topC = hpsY - 0.008;
+  const topY = (x: number) => {
+    const d = Math.max(0, Math.abs(x) - nw * 0.7);
+    return topC - slope * d - (0.07 * d * d) / half;
+  };
+  const armH = (x: number) => 0.03 - 0.007 * (Math.abs(x) / half);
+  const arms = new THREE.Shape();
+  const n = 28;
+  const tipR = armH(half) / 2;
+  arms.moveTo(-half, topY(-half));
   for (let i = 1; i <= n; i++) {
     const x = -half + (2 * half * i) / n;
-    shape.lineTo(x, topY(x));
+    arms.lineTo(x, topY(x));
   }
-  shape.quadraticCurveTo(half + endR * 1.1, topY(half) - endR, half, topY(half) - depthAt(half));
+  arms.quadraticCurveTo(half + tipR * 1.15, topY(half) - tipR, half, topY(half) - armH(half));
   for (let i = n - 1; i >= 0; i--) {
     const x = -half + (2 * half * i) / n;
-    shape.lineTo(x, topY(x) - depthAt(x));
+    arms.lineTo(x, topY(x) - armH(x));
   }
-  shape.quadraticCurveTo(-half - endR * 1.1, topY(-half) - endR, -half, topY(-half));
-  const bevel = 0.0025;
-  const bodyGeo = new THREE.ExtrudeGeometry(shape, {
-    depth: thick - 2 * bevel,
-    bevelEnabled: true,
-    bevelThickness: bevel,
-    bevelSize: bevel,
-    bevelSegments: 3,
-    curveSegments: 12,
-  });
-  bodyGeo.translate(0, 0, zc - (thick - 2 * bevel) / 2);
-  bodyGeo.computeVertexNormals();
-  addMesh(group, bodyGeo, wood);
+  arms.quadraticCurveTo(-half - tipR * 1.15, topY(-half) - tipR, -half, topY(-half));
+  addMesh(group, extrude(arms), lacquer);
 
-  // --- chrome ferrule where the hook enters the wood ---
-  const ferrule = new THREE.CylinderGeometry(0.0048, 0.0058, 0.012, 16);
-  addMesh(group, ferrule, metal).position.set(0, topC + 0.005, zc);
+  // --- birch centre block the hook is screwed into ---
+  const bw = 0.056;
+  const bt = 0.02;
+  const bh = 0.036;
+  const by = topY(bw) - 0.004;
+  const block = new THREE.Shape();
+  block.moveTo(-bw, by);
+  block.lineTo(bw, by);
+  block.lineTo(bw * 0.92, by + 0.004);
+  block.quadraticCurveTo(bt * 1.4, by + bh * 0.78, bt, by + bh);
+  block.lineTo(-bt, by + bh);
+  block.quadraticCurveTo(-bt * 1.4, by + bh * 0.78, -bw * 0.92, by + 0.004);
+  block.closePath();
+  addMesh(group, extrude(block), birch);
 
-  // --- hook: straight stem, then a "?" curl over to one side ending in a ball tip ---
-  const wire = 0.0026;
-  const R = 0.026;
-  const stemTop = hpsY + 0.05;
+  // --- trouser bar between the arm tips ---
+  const barY = topY(half) - armH(half) * 0.45;
+  const bar = new THREE.CylinderGeometry(0.0045, 0.0045, half * 2 - 0.02, 14);
+  bar.rotateZ(Math.PI / 2);
+  addMesh(group, bar, birch).position.set(0, barY, 0);
+
+  // --- chrome hook: stem out of the block, "?" curl to one side, ball tip ---
+  const wire = 0.0031;
+  const R = 0.023;
+  const stemBase = by + bh - 0.004;
+  const stemTop = hpsY + 0.052;
   const pts: THREE.Vector3[] = [];
-  for (let i = 0; i <= 8; i++) pts.push(V(0, topC + ((stemTop - topC) * i) / 8, zc));
-  const endA = Math.PI * 1.22;
+  for (let i = 0; i <= 8; i++) pts.push(V(0, stemBase + ((stemTop - stemBase) * i) / 8, 0));
+  const endA = Math.PI * 1.25;
   for (let i = 1; i <= 40; i++) {
     const a = (endA * i) / 40;
-    pts.push(V(-R + R * Math.cos(a), stemTop + R * Math.sin(a), zc));
+    pts.push(V(-R + R * Math.cos(a), stemTop + R * Math.sin(a), 0));
   }
   const hookCurve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-  addMesh(group, new THREE.TubeGeometry(hookCurve, 96, wire, 12), metal);
-  const tip = pts[pts.length - 1];
-  addMesh(group, new THREE.SphereGeometry(wire * 1.35, 16, 12), metal).position.copy(tip);
+  addMesh(group, new THREE.TubeGeometry(hookCurve, 96, wire, 12), chrome);
+  addMesh(group, new THREE.SphereGeometry(wire * 1.3, 16, 12), chrome).position.copy(pts[pts.length - 1]);
+  const ferrule = new THREE.CylinderGeometry(0.0046, 0.0054, 0.008, 16);
+  addMesh(group, ferrule, chrome).position.set(0, stemBase + 0.003, 0);
+}
+
+/** Trousers hanging flat, legs side by side, built from the front leg silhouette. */
+function buildTrousers(group: THREE.Group, p: GarmentParams, mat: THREE.Material) {
+  const M = measures(p);
+  const T = draftTrousers(M);
+  const leg = T.pieces[0].edges;
+  const d = T.dims;
+  // front leg in its drafting frame: centre front at x = cx; move it so the centre front is x = 0
+  const cx = (d.hip / 4 - 10) / 2;
+  const sh = (pts: Point[]) => pts.map((q) => ({ x: q.x - cx, y: q.y }));
+  const gap = 3; // the legs hang touching, with a hair of daylight between them
+  const sideL = sh(leg[4].pts); // outer hem -> waist
+  const hemL = sh(leg[3].pts); // inner hem -> outer hem
+  const inner = sh(leg[2].pts).map((q) => ({ x: Math.min(q.x, -gap), y: q.y })); // crotch -> inner hem
+  const crotchY = inner[0].y;
+  const innerL: Point[] = [{ x: -gap, y: crotchY }, ...inner.slice(1).map((q) => ({ x: -gap, y: q.y }))];
+  const waistL = sh(leg[0].pts); // side -> centre
+  const waistFull = concat(waistL, [{ x: 0, y: 0 }], mir(rev(waistL)));
+  const L = hemL[0].y;
+  const outline = closeLoop(concat(sideL, waistFull, mir(rev(sideL)), mir(hemL), mir(rev(innerL)), [{ x: -gap, y: crotchY }], innerL, hemL));
+  const spec: ShellSpec = {
+    outline,
+    constraints: [],
+    closed: segsOf([sideL, mir(sideL), innerL, mir(innerL), [{ x: -gap, y: crotchY }, { x: gap, y: crotchY }]]),
+    creases: new Float64Array(0),
+    depth: 27,
+    roll: 60,
+    profile: (q) => 0.85 + 0.15 * smoothstep(L, d.rise * 0.6, q.y),
+    fold: (q, back) => {
+      const ph = back ? 1.3 : 0;
+      const s = q.x < 0 ? -1 : 1;
+      const lx = Math.abs(q.x);
+      return (
+        (0.6 * Math.sin((2 * Math.PI * lx) / 95 + ph + q.y * 0.003 + s) + 0.4 * Math.sin((2 * Math.PI * lx) / 47 + 2 + ph * 1.4 + q.y * 0.005)) *
+        (1.2 + 2.8 * smoothstep(crotchY, L, q.y))
+      );
+    },
+    topW: L + 10,
+  };
+  buildShellLayer(group, spec, false, mat);
+  buildShellLayer(group, spec, true, mat);
+  addMesh(group, ribBand(openingLoop(spec, waistFull, waistFull), 0.04, 0.25), mat);
+}
+
+/** A-line skirt hanging flat from its waistband. */
+function buildSkirt(group: THREE.Group, p: GarmentParams, mat: THREE.Material) {
+  const M = measures(p);
+  const S = draftSkirt(M);
+  const front = S.pieces[0].edges;
+  const back = S.pieces[1].edges;
+  const sideR = front[1].pts;
+  const hem = front[2].pts;
+  const outlineFor = (waist: Point[]) => closeLoop(concat(waist, sideR, hem, mir(rev(sideR))));
+  const len = S.dims.length;
+  const spec: ShellSpec = {
+    outline: [],
+    constraints: [],
+    closed: segsOf([sideR, mir(sideR)]),
+    creases: new Float64Array(0),
+    depth: 26,
+    roll: 60,
+    profile: (q) => 0.8 + 0.2 * smoothstep(len, 150, q.y),
+    fold: (q, back) => {
+      // flared folds radiating from the hips to the hem
+      const th = Math.atan2(q.x, q.y + 260);
+      const ph = back ? 0.9 : 0;
+      return (Math.sin(9 * th + 0.5 + ph) + 0.45 * Math.sin(21 * th + 2 + ph)) * 5 * smoothstep(120, len, q.y);
+    },
+    topW: len + 10,
+  };
+  buildShellLayer(group, { ...spec, outline: outlineFor(front[0].pts) }, false, mat);
+  buildShellLayer(group, { ...spec, outline: outlineFor(back[0].pts) }, true, mat);
+  addMesh(group, ribBand(openingLoop(spec, front[0].pts, back[0].pts), 0.035, 0.25), mat);
+}
+
+/** Empty tote hanging flat from its handles; the box bottom folds flat. */
+function buildTote(group: THREE.Group, p: GarmentParams, mat: THREE.Material): MeshPrintSurface[] {
+  const M = measures(p);
+  const w = TOTE.w + TOTE.box * 2;
+  const hh = TOTE.h + M.lenAdj;
+  const outline: Point[] = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: hh }, { x: 0, y: hh }];
+  const spec: ShellSpec = {
+    outline,
+    constraints: [],
+    closed: segsOf([[{ x: w, y: 0 }, { x: w, y: hh }, { x: 0, y: hh }, { x: 0, y: 0 }]]),
+    creases: new Float64Array(0),
+    depth: 16,
+    roll: 55,
+    profile: (q) => 0.75 + 0.25 * smoothstep(hh, 0, q.y),
+    fold: (q, back) => (0.5 * Math.sin((2 * Math.PI * q.x) / 150 + (back ? 1.5 : 0.3)) + 0.3 * Math.sin((2 * Math.PI * q.x) / 70 + 1.1)) * 1.6 * smoothstep(0, hh * 0.4, q.y),
+    topW: hh + 10,
+  };
+  const surfaces: MeshPrintSurface[] = [];
+  for (const back of [false, true]) {
+    const layer = buildShellLayer(group, spec, back, mat);
+    const n = layer.mesh.pts.length;
+    const px = new Float32Array(n);
+    const py = new Float32Array(n);
+    layer.mesh.pts.forEach((q, i) => {
+      px[i] = back ? w - q.x : q.x;
+      py[i] = q.y;
+    });
+    surfaces.push({ panel: back ? 'back' : 'front', geo: layer.geo, px, py, tris: layer.mesh.tris });
+  }
+  // handles: folded straps sewn to the top edge, hanging in a loop above the bag
+  for (const back of [false, true]) {
+    const z = (back ? -1 : 1) * (shellDepth(spec, { x: w * 0.25, y: 2 }, back) - 1.5);
+    const pts = [
+      shellWorld(spec, { x: w * 0.24, y: 20 }, z),
+      shellWorld(spec, { x: w * 0.23, y: -120 }, z * 1.15),
+      shellWorld(spec, { x: w * 0.5, y: -290 }, z * 1.3),
+      shellWorld(spec, { x: w * 0.77, y: -120 }, z * 1.15),
+      shellWorld(spec, { x: w * 0.76, y: 20 }, z),
+    ];
+    const strap = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 64, 0.0055, 10);
+    strap.scale(1, 1, 1);
+    const sm = addMesh(group, strap, mat);
+    sm.scale.set(1, 1, 1);
+  }
+  return surfaces;
 }
 
 /** Transparent overlay that carries a panel texture on a pattern-built garment mesh. */
@@ -1491,178 +1597,17 @@ function meshPrintOverlay(s: MeshPrintSurface, tex: PanelTexture): THREE.Mesh {
   return m;
 }
 
-/**
- * Transparent overlay mesh that follows a tube surface and shows a panel texture.
- * Columns are mapped to panel x by arc length around the ring, rows to panel y.
- */
-function printOverlay(s: PrintSurface, tex: PanelTexture): THREE.Mesh {
-  const { rows, segs } = s.geo.userData.tube as { rows: number; segs: number };
-  const cols = segs + 1;
-  const pos = s.geo.getAttribute('position') as THREE.BufferAttribute;
-  const nrm = s.geo.getAttribute('normal') as THREE.BufferAttribute;
-  const b = tex.bounds;
-  const bw = b.maxX - b.minX;
-  const bh = b.maxY - b.minY;
-  const outPos = new Float32Array(rows * cols * 3);
-  const outNrm = new Float32Array(rows * cols * 3);
-  const outUv = new Float32Array(rows * cols * 2);
-  const px = new Float32Array(rows * cols);
-  const py = new Float32Array(rows * cols);
-  const a = new THREE.Vector3();
-  const c = new THREE.Vector3();
-  const arc = new Float64Array(cols);
-  let perim = 0;
-  for (let r = 0; r < rows; r++) {
-    arc[0] = 0;
-    for (let j = 1; j < cols; j++) {
-      a.fromBufferAttribute(pos, r * cols + j - 1);
-      c.fromBufferAttribute(pos, r * cols + j);
-      arc[j] = arc[j - 1] + a.distanceTo(c);
-    }
-    perim = Math.max(perim, arc[segs]);
-    const P = arc[segs];
-    for (let j = 0; j < cols; j++) {
-      const i = r * cols + j;
-      let rel = arc[s.refCol] - arc[j];
-      if (rel > P / 2) rel -= P;
-      if (rel < -P / 2) rel += P;
-      a.fromBufferAttribute(pos, i);
-      c.fromBufferAttribute(nrm, i);
-      const x = (s.xOffset ?? 0) + rel * 1000;
-      const y = s.mapY(r, a);
-      px[i] = x;
-      py[i] = y;
-      outPos[i * 3] = a.x + c.x * 0.0009;
-      outPos[i * 3 + 1] = a.y + c.y * 0.0009;
-      outPos[i * 3 + 2] = a.z + c.z * 0.0009;
-      outNrm[i * 3] = c.x;
-      outNrm[i * 3 + 1] = c.y;
-      outNrm[i * 3 + 2] = c.z;
-      outUv[i * 2] = (x - b.minX) / bw;
-      outUv[i * 2 + 1] = 1 - (y - b.minY) / bh;
-    }
-  }
-  const idx: number[] = [];
-  const jump = perim * 250; // a quarter of the circumference in mm: a triangle across the wrap
-  const out = (i: number) => px[i] < b.minX || px[i] > b.maxX || py[i] < b.minY || py[i] > b.maxY;
-  for (let r = 0; r < rows - 1; r++) {
-    for (let j = 0; j < segs; j++) {
-      const i0 = r * cols + j;
-      const i1 = i0 + 1;
-      const i2 = i0 + cols;
-      const i3 = i2 + 1;
-      const xs = [px[i0], px[i1], px[i2], px[i3]];
-      if (Math.max(...xs) - Math.min(...xs) > jump) continue;
-      if (out(i0) && out(i1) && out(i2) && out(i3)) continue;
-      idx.push(i0, i2, i1, i1, i2, i3);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(outPos, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(outNrm, 3));
-  g.setAttribute('uv', new THREE.BufferAttribute(outUv, 2));
-  g.setIndex(idx);
-  const m = new THREE.Mesh(g, createInkMaterial(tex.texture));
-  m.name = `print-${s.panel}`;
-  m.renderOrder = 1;
-  m.receiveShadow = true;
-  return m;
-}
-
-function buildTrousers(group: THREE.Group, p: GarmentParams, mat: THREE.Material) {
-  const M = measures(p);
-  const d = draftTrousers(M).dims;
-  const Lt = (d.rise + d.inseam) / 1000;
-  const rise = d.rise / 1000;
-  const [wa, wb] = ellipseFromCirc(d.waist, 1.3);
-  const [ha, hb] = ellipseFromCirc(d.hip, 1.3);
-  addMesh(
-    group,
-    tubeGeometry([hRing(Lt + 0.04, wa, wb, 0), hRing(Lt, wa, wb, 0.001), hRing(Lt - rise * 0.5, ha, hb, 0.003), hRing(Lt - rise - 0.02, ha * 0.98, hb * 1.0, 0.003)], 64),
-    mat,
-  );
-  const thighR = (d.hip * 0.6) / 1000 / (2 * Math.PI);
-  const hemR = d.hemCirc / 1000 / (2 * Math.PI);
-  for (const s of [-1, 1]) {
-    const x0 = s * ha * 0.5;
-    const rings: Ring[] = [
-      hRing(Lt - rise * 0.55, thighR * 1.05, thighR, 0.002, 0, x0),
-      hRing(Lt - rise - 0.04, thighR, thighR * 0.98, 0.003, 0, x0 * 1.02),
-      hRing(Lt * 0.45, hemR * 1.06, hemR * 1.0, 0.004, 0, x0 * 1.08 + s * 0.01),
-      hRing(0.04, hemR * 1.02, hemR, 0.006, 0, x0 * 1.12 + s * 0.015),
-      hRing(0, hemR * 1.02, hemR * 1.0, 0.005, 0, x0 * 1.12 + s * 0.015),
-    ];
-    addMesh(group, tubeGeometry(rings, 48, s * 2), mat);
-  }
-}
-
-function buildSkirt(group: THREE.Group, p: GarmentParams, mat: THREE.Material) {
-  const M = measures(p);
-  const d = draftSkirt(M).dims;
-  const L = d.length / 1000;
-  const [wa, wb] = ellipseFromCirc(d.waist, 1.3);
-  const [ha, hb] = ellipseFromCirc((M.m.hip + 60), 1.3);
-  const [ea, eb] = ellipseFromCirc(d.hem, 1.15);
-  addMesh(
-    group,
-    tubeGeometry(
-      [
-        hRing(L + 0.035, wa, wb, 0),
-        hRing(L, wa, wb, 0),
-        hRing(L - 0.19, ha, hb, 0.004),
-        hRing(L * 0.4, (ha + ea) / 2, (hb + eb) / 2, 0.018),
-        hRing(0, ea, eb, 0.03),
-      ],
-      96,
-      0.7,
-    ),
-    mat,
-  );
-}
-
-function buildTote(group: THREE.Group, p: GarmentParams, mat: THREE.Material): PrintSurface[] {
-  const M = measures(p);
-  const w = TOTE.w / 2000;
-  const dpt = TOTE.box / 1000;
-  const h = (TOTE.h + M.lenAdj) / 1000;
-  const r = (y: number, fold: number): Ring => ({ c: V(0, y, 0), u: X.clone(), v: Z.clone(), a: w, b: dpt, fold, square: 1 });
-  const bodyGeo = tubeGeometry([r(0.003, 0), r(h * 0.5, 0.002), r(h, 0.003)], 96, 0.4);
-  addMesh(group, bodyGeo, mat);
-  const mapY = (_row: number, pos: THREE.Vector3) => (h - pos.y) * 1000;
-  const xOffset = (TOTE.w + TOTE.box * 2) / 2;
-  const bottom = new THREE.Shape();
-  bottom.moveTo(-w, -dpt);
-  bottom.lineTo(w, -dpt);
-  bottom.lineTo(w, dpt);
-  bottom.lineTo(-w, dpt);
-  bottom.closePath();
-  const bg = new THREE.ShapeGeometry(bottom);
-  bg.rotateX(Math.PI / 2);
-  bg.translate(0, 0.003, 0);
-  addMesh(group, bg, mat);
-  for (const s of [-1, 1]) {
-    const z = s * dpt * 0.98;
-    const curve = new THREE.CatmullRomCurve3([V(-w * 0.45, h - 0.03, z), V(-w * 0.5, h + 0.18, z * 1.2), V(0, h + 0.3, z * 1.3), V(w * 0.5, h + 0.18, z * 1.2), V(w * 0.45, h - 0.03, z)]);
-    const strap = new THREE.TubeGeometry(curve, 48, 0.006, 12);
-    strap.scale(1, 1, 1);
-    addMesh(group, strap, mat);
-  }
-  return [
-    { panel: 'front', geo: bodyGeo, refCol: 24, mapY, xOffset },
-    { panel: 'back', geo: bodyGeo, refCol: 72, mapY, xOffset },
-  ];
-}
-
 /** Build a 3D draped preview of the sewn garment. */
 export function buildGarmentObject(params: GarmentParams, materialId: string, options: GarmentObjectOptions): THREE.Object3D {
   const p = sanitize(params);
   const mat = createPhysicalMaterial(materialId, options.color, 1);
+  mat.vertexColors = true; // baked fold shading
   const outer = new THREE.Group();
   outer.name = 'garment';
   const group = new THREE.Group();
   outer.add(group);
   FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1));
-  let surfaces: (PrintSurface | MeshPrintSurface)[] = [];
+  let surfaces: MeshPrintSurface[] = [];
   switch (p.garment) {
     case 'hoodie':
       surfaces = buildTop(group, p, mat, true, !!options.hanger);
@@ -1688,7 +1633,7 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
       const own = surfaces.filter((s) => s.panel === panel.id);
       if (!own.length) continue;
       const tex = createPanelTexture(panel.id, panel.bounds, panel.seam);
-      const meshes = own.map((s) => ('tris' in s ? meshPrintOverlay(s, tex) : printOverlay(s, tex)));
+      const meshes = own.map((s) => meshPrintOverlay(s, tex));
       meshes.forEach((m) => group.add(m));
       prints.push({ tex, meshes });
     }

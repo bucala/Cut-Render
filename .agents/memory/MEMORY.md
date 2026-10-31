@@ -1,2 +1,3 @@
 - [PPF flattening quality](ppf-flattening.md) — smooth triangle-stepped boundaries before offset, then strip offset self-intersections, or cut lines get jagged loops.
-- [Pushing to GitHub](github-push.md) — no git auth; push via connector Git Data API (inline-content trees, FF ref update); remote keeps its LICENSE/README.
+- [Pushing to GitHub](github-push.md) — no git auth; push via connector Git Data API (inline-content trees, FF ref update); remote-only LICENSE; binaries need base64 blobs.
+- [Pattern-based garment meshing](garment-mesh.md) — cdt2d: filter by centroid, constraint endpoints on the outline; path tracer needs RGBA vertex colours (RGB breaks merge).

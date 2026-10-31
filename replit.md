@@ -41,7 +41,7 @@ A product studio for designing apparel, packaging and PPF-film-wrapped objects, 
 ## Product
 
 - Odevy: parametric T-shirt, hoodie, trousers, skirt, tote; sizes XS–XXL, seam/hem allowances, nesting on fabric width.
-- 3D tops (T-shirt, hoodie) are built from the drafted pattern itself (`engine/garmentMesh.ts`, cdt2d): front/back pieces + sleeves sewn into the armholes form one flat silhouette, meshed and inflated into front/back layers that meet at closed seams. Silhouette = cut plan; sleeves are part of the body surface. Trousers/skirt/tote still use ring tubes.
+- All 3D garments are built from the drafted pattern itself (`engine/garmentMesh.ts`, cdt2d; `ShellSpec`/`buildShellLayer` in `engine/apparel.ts`): the sewn pieces form one flat silhouette, meshed and inflated into front/back layers that meet at closed seams (z = 0); hems, necklines and cuffs stay open. Silhouette = cut plan; sleeves are part of the body surface and hang pivoted at the shoulder (30° short / 46° long). Fold shading is baked as RGBA vertex colours (`cavityShade`; 3-component colour attributes break the path tracer's geometry merge). Rib bands (neck, waist) lean toward the opening centre. Tops hang on a white lacquered shop hanger (arched arms, birch block, chrome hook, trouser bar) when `renderSettings.hanger` is on.
 - Obaly: FEFCO 0201, ECMA tuck-end, FEFCO 0427 mailer, FEFCO 0300 tray with live 3D folding.
 - PPF: import STEP/IGES/STL/OBJ/PLY/3MF/GLB/FBX/DAE/USDZ/BREP (auto-detected), split into film pieces by max angle, flatten with stretch report, nest on roll.
 - Exports SVG, DXF, PDF (1:1), JSON; PNG snapshot of the 3D view.

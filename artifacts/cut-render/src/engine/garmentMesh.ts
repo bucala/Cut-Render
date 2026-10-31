@@ -139,3 +139,77 @@ export function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 }
+
+/** Outline vertex indices of a region mesh (the first `n` points added by meshRegion are the border). */
+export function boundaryFlags(m: RegionMesh): Uint8Array {
+  // count edge usage: an edge used by a single triangle is on the boundary
+  const use = new Map<string, number>();
+  const key = (a: number, b: number) => (a < b ? `${a}_${b}` : `${b}_${a}`);
+  const t = m.tris;
+  for (let k = 0; k < t.length; k += 3) {
+    for (let e = 0; e < 3; e++) {
+      const kk = key(t[k + e], t[k + ((e + 1) % 3)]);
+      use.set(kk, (use.get(kk) ?? 0) + 1);
+    }
+  }
+  const flags = new Uint8Array(m.pts.length);
+  for (const [kk, n] of use) {
+    if (n === 1) {
+      const [a, b] = kk.split('_').map(Number);
+      flags[a] = 1;
+      flags[b] = 1;
+    }
+  }
+  return flags;
+}
+
+/**
+ * Cheap baked fold shading: vertices lying in a valley of the depth field (relative to their
+ * neighbours, seen from the outside) are darkened. Returns per-vertex grey levels 0..1.
+ */
+export function cavityShade(m: RegionMesh, z: ArrayLike<number>, outwardSign: number, strength: number): Float32Array {
+  const n = m.pts.length;
+  const sum = new Float64Array(n);
+  const cnt = new Uint16Array(n);
+  const t = m.tris;
+  for (let k = 0; k < t.length; k += 3) {
+    for (let e = 0; e < 3; e++) {
+      const a = t[k + e];
+      const b = t[k + ((e + 1) % 3)];
+      sum[a] += z[b];
+      cnt[a]++;
+      sum[b] += z[a];
+      cnt[b]++;
+    }
+  }
+  const border = boundaryFlags(m);
+  const raw = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!cnt[i] || border[i]) {
+      raw[i] = 1;
+      continue;
+    }
+    const cav = outwardSign * (sum[i] / cnt[i] - z[i]);
+    raw[i] = 1 - strength * smoothstep(0.08, 1.4, cav);
+  }
+  // two neighbour-averaging passes so the shading follows the folds, not the mesh lattice
+  let cur = raw;
+  for (let pass = 0; pass < 2; pass++) {
+    const acc = new Float64Array(n);
+    const num = new Uint16Array(n);
+    for (let k = 0; k < t.length; k += 3) {
+      for (let e = 0; e < 3; e++) {
+        const a = t[k + e];
+        const b = t[k + ((e + 1) % 3)];
+        acc[a] += cur[b];
+        num[a]++;
+        acc[b] += cur[a];
+        num[b]++;
+      }
+    }
+    const next = new Float32Array(n);
+    for (let i = 0; i < n; i++) next[i] = num[i] ? (cur[i] + acc[i] / num[i]) / 2 : cur[i];
+    cur = next;
+  }
+  return cur;
+}
