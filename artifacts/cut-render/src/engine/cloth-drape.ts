@@ -4,6 +4,8 @@ export interface ClothPanel {
   geometry: THREE.BufferGeometry;
   /** Coincident closed-edge vertices are sewn; open hems and necklines stay open. */
   sewn: (vertex: number) => boolean;
+  /** Vertices held at their drafted position, e.g. a neckline braced by its rib band. */
+  pinned?: (vertex: number) => boolean;
 }
 
 export interface ClothSupport {
@@ -74,6 +76,7 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
         weight[v] = 0;
         pos[v * 3 + 2] += hangerDepth(support, x);
       }
+      if (panel.pinned?.(i)) weight[v] = 0;
       if (panel.sewn(i)) {
         const key = `${Math.round(x * 1e6)}:${Math.round(y * 1e6)}`;
         const other = sewn.get(key);
@@ -112,16 +115,16 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
       for (let v = 0; v < count; v++) {
         if (!weight[v]) continue;
         const i = v * 3, x = pos[i];
-        if (Math.abs(x) > support.halfWidth + 0.009) continue;
+        if (Math.abs(x) > support.halfWidth + 0.016) continue;
         const cy = hangerHeight(support, x) - 0.013;
         const cz = hangerDepth(support, x);
-        const dy = (pos[i + 1] - cy) / 0.018, dz = (pos[i + 2] - cz) / 0.010;
+        const dy = (pos[i + 1] - cy) / 0.018, dz = (pos[i + 2] - cz) / 0.012;
         const r = Math.sqrt(dy * dy + dz * dz);
         if (r < 1) {
           const zSign = original[i + 2] < 0 ? -1 : 1;
           const safe = Math.max(r, 0.0001);
           pos[i + 1] = cy + dy / safe * 0.018;
-          pos[i + 2] = cz + (Math.abs(dz) < 1e-7 ? zSign * 0.010 : dz / safe * 0.010);
+          pos[i + 2] = cz + (Math.abs(dz) < 1e-7 ? zSign * 0.012 : dz / safe * 0.012);
         }
         // Two-sided cloth thickness barrier; prevents front/back inversion.
         if (Math.abs(original[i + 2]) > 0.001)
@@ -151,27 +154,30 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
     const bucket = grid.get(k) ?? [];
     bucket.push(v); grid.set(k, bucket);
   }
+  // Compactly supported smooth kernel: neighbouring trim vertices get continuous offsets.
+  // Nearest-k inverse-distance weights jumped between neighbour sets and tore rib bands into teeth.
+  const h2 = 0.022 * 0.022;
   const displacement = (point: THREE.Vector3) => {
     const cx = Math.floor(point.x / cell), cy = Math.floor(point.y / cell), cz = Math.floor(point.z / cell);
-    const nearest: { v: number; d: number }[] = [];
+    const out = new THREE.Vector3();
+    let sum = 0, nearest = -1, best = Infinity;
     for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
       for (const v of grid.get(key(cx + x, cy + y, cz + z)) ?? []) {
         const i = v * 3;
         const d = (point.x - original[i]) ** 2 + (point.y - original[i + 1]) ** 2 + (point.z - original[i + 2]) ** 2;
-        if (nearest.length === 4 && d >= nearest[3].d) continue;
-        nearest.push({ v, d }); nearest.sort((a, b) => a.d - b.d); nearest.length = Math.min(4, nearest.length);
+        if (d < best) { best = d; nearest = v; }
+        if (d >= h2) continue;
+        const w = (1 - d / h2) ** 2;
+        out.x += (pos[i] - original[i]) * w;
+        out.y += (pos[i + 1] - original[i + 1]) * w;
+        out.z += (pos[i + 2] - original[i + 2]) * w;
+        sum += w;
       }
     }
-    const out = new THREE.Vector3();
-    let sum = 0;
-    for (const { v, d } of nearest) {
-      const w = 1 / Math.max(d, 1e-10), i = v * 3;
-      out.x += (pos[i] - original[i]) * w;
-      out.y += (pos[i + 1] - original[i + 1]) * w;
-      out.z += (pos[i + 2] - original[i + 2]) * w;
-      sum += w;
-    }
-    return sum ? out.divideScalar(sum) : out;
+    if (sum) return out.divideScalar(sum);
+    if (nearest < 0) return out;
+    const i = nearest * 3;
+    return out.set(pos[i] - original[i], pos[i + 1] - original[i + 1], pos[i + 2] - original[i + 2]);
   };
   return { displacement, particles: count, constraints: rest.length };
 }

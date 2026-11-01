@@ -920,6 +920,8 @@ interface ShellSpec {
   fold: (q: Point, back: boolean) => number;
   /** world y (mm) of pattern y = 0 */
   topW: number;
+  /** extra downward offset (mm) that lays the shoulders onto the hanger slope */
+  drop?: (q: Point) => number;
   step?: number;
 }
 
@@ -940,7 +942,7 @@ function shellDepth(s: ShellSpec, q: Point, back: boolean): number {
 }
 
 function shellWorld(s: ShellSpec, q: Point, z: number): THREE.Vector3 {
-  return V(q.x / 1000, (s.topW - q.y) / 1000, z / 1000);
+  return V(q.x / 1000, (s.topW - q.y - (s.drop?.(q) ?? 0)) / 1000, z / 1000);
 }
 
 /** Orient triangles so the layer faces outward (+z front, -z back). */
@@ -1013,7 +1015,8 @@ function ribBand(loop: THREE.Vector3[], height: number, tilt: number): THREE.Buf
   const dense: THREE.Vector3[] = [];
   loop.forEach((a, i) => {
     const b = loop[(i + 1) % loop.length];
-    const steps = Math.max(1, Math.ceil(a.distanceTo(b) / 0.0006));
+    // Six samples per 1.8 mm rib period; coarser sampling aliased the ribs into a sawtooth edge.
+    const steps = Math.max(1, Math.ceil(a.distanceTo(b) / 0.0003));
     for (let j = 0; j < steps; j++) dense.push(a.clone().lerp(b, j / steps));
   });
   loop = dense;
@@ -1025,19 +1028,21 @@ function ribBand(loop: THREE.Vector3[], height: number, tilt: number): THREE.Buf
   const pos: number[] = [];
   const uv: number[] = [];
   const C = loop.reduce((a, p) => a.add(p), V(0, 0, 0)).multiplyScalar(1 / n);
+  const span = Math.max(1, Math.round(0.005 / 0.0003));
   let run = 0;
   for (let i = 0; i <= n; i++) {
     const P = loop[i % n];
     if (i > 0) run += P.distanceTo(loop[i - 1]);
     // the band leans toward the middle of the opening, so it forms a ring that narrows upward
-    const T = loop[(i + 1) % n].clone().sub(loop[(i + n - 1) % n]).normalize();
+    // Tangent over ~1 cm: neighbouring dense samples would kink the band at every original vertex.
+    const T = loop[(i + span) % n].clone().sub(loop[(i + n - span) % n]).normalize();
     const m = C.clone().sub(P);
     m.addScaledVector(T, -m.dot(T));
     if (m.lengthSq() < 1e-10) m.set(0, 0, -1);
     m.normalize();
     const up = V(0, 1, 0).addScaledVector(m, tilt).normalize();
     for (const [s, baseR] of prof) {
-      const r = baseR + 0.00022 * Math.cos(run * Math.PI * 2 / 0.0015) * Math.sin(s * Math.PI / 2);
+      const r = baseR + 0.00018 * Math.cos(run * Math.PI * 2 / 0.0018) * Math.sin(s * Math.PI / 2);
       pos.push(P.x + up.x * s * height + m.x * r, P.y + up.y * s * height + m.y * r, P.z + up.z * s * height + m.z * r);
       uv.push(run, s * height);
     }
@@ -1075,6 +1080,9 @@ function closeLoop(pts: Point[]): Point[] {
 }
 
 const mirP = (q: Point): Point => ({ x: -q.x, y: q.y });
+
+/** Extra shoulder slope a hanger adds to the drafted shoulder line (about 12 degrees). */
+const SHOULDER_DROP = 0.22;
 
 const REGION_BODY = 0;
 const REGION_SLEEVE_POS = 1; // world +x: the wearer's left sleeve
@@ -1251,13 +1259,26 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
       ) * sleeveDrop;
     },
     topW: yBot + 10,
+    drop: (q) => {
+      const d = SHOULDER_DROP * Math.min(Math.max(Math.abs(q.x) - nw, 0), SP.x - nw);
+      if (!d) return 0;
+      // Sleeves hang from the armhole: below the underarm they take its drop instead of fading out,
+      // which keeps the offset continuous across the sleeve seam.
+      const sleeve = q.y < hemY && !pointInPolygon(q.x, q.y, bodyPolyB);
+      return d * (1 - smoothstep(SP.y, ad + 160, sleeve ? Math.min(q.y, ad) : q.y));
+    },
   };
   const surfaces: MeshPrintSurface[] = [];
   const cloth: ClothPanel[] = [];
 
   const makeLayer = (neck: Point[], back: boolean) => {
     const layer = buildShellLayer(group, { ...spec, outline: outlineFor(neck) }, back, mat);
-    cloth.push({ geometry: layer.geo, sewn: (i) => distToSegs(layer.mesh.pts[i].x, layer.mesh.pts[i].y, spec.closed) < 0.01 });
+    const neckSegs = segsOf([neck]);
+    cloth.push({
+      geometry: layer.geo,
+      sewn: (i) => distToSegs(layer.mesh.pts[i].x, layer.mesh.pts[i].y, spec.closed) < 0.01,
+      pinned: (i) => distToSegs(layer.mesh.pts[i].x, layer.mesh.pts[i].y, neckSegs) < 8,
+    });
     const { pts, tris } = layer.mesh;
     const n = pts.length;
     const bodyPoly = back ? bodyPolyB : bodyPolyF;
@@ -1314,14 +1335,17 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   addMesh(group, ribBand(openingLoop(spec, neckF, neckB), hoodie ? 0.032 : 0.022, hoodie ? 1.1 : 0.8), mat);
   const depthAt = (q: Point, back: boolean) => shellDepth(spec, q, back);
   const toWorld = (q: Point, z: number) => shellWorld(spec, q, z);
-  const hemInset = bottom.map((q) => ({ x: q.x * 0.985, y: q.y - 5 }));
+  // Twin-needle cover stitch sits ~2 cm inside the hem, never on the silhouette edge.
+  const hemInset = bottom.map((q) => ({ x: q.x * 0.95, y: q.y - 20 }));
   const sleeveInset = endR.map((q) => {
     const dx = SP.x - q.x, dy = SP.y - q.y, len = Math.hypot(dx, dy) || 1;
-    return { x: q.x + dx / len * 5, y: q.y + dy / len * 5 };
+    return { x: q.x + dx / len * 20, y: q.y + dy / len * 20 };
   });
   for (const back of [false, true]) {
-    for (const path of [hemInset, sleeveInset, mir(sleeveInset), armR, mir(armR), shoulderR, mir(shoulderR), back ? neckB : neckF])
-      addSewnDetail(group, path.map((q) => toWorld(q, (back ? -1 : 1) * (depthAt(q, back) + 0.7))), mat);
+    const world = (path: Point[]) => path.map((q) => toWorld(q, (back ? -1 : 1) * (depthAt(q, back) + 0.7)));
+    for (const path of [hemInset, sleeveInset, mir(sleeveInset), back ? neckB : neckF]) addSewnDetail(group, world(path), mat);
+    // Set-in sleeve seams show as a soft ridge only; shoulder seams lie on the silhouette edge.
+    for (const path of [armR, mir(armR)]) addSewnDetail(group, world(path), mat, false);
   }
 
   if (!hoodie) {
@@ -1391,8 +1415,8 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     }
   }
 
-  const slope = (SP.y - shoulderR[0].y) / (SP.x - nw);
-  const support = { top: spec.topW / 1000, neckWidth: nw / 1000, halfWidth: Math.min(SP.x / 1000 - 0.028, 0.225), slope, depthBow: 0.012 };
+  const slope = (SP.y - shoulderR[0].y) / (SP.x - nw) + SHOULDER_DROP;
+  const support = { top: spec.topW / 1000, neckWidth: nw / 1000, halfWidth: Math.min(SP.x / 1000 - 0.05, 0.205), slope };
   const settled = settleCloth(cloth, support);
   const shells = new Set(cloth.map((c) => c.geometry));
   const vertex = new THREE.Vector3();
@@ -1433,13 +1457,14 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
 }
 
 /** Raised seam cord plus short lockstitches, merged to keep draw calls bounded. */
-function addSewnDetail(group: THREE.Group, path: THREE.Vector3[], fabric: THREE.Material) {
+function addSewnDetail(group: THREE.Group, path: THREE.Vector3[], fabric: THREE.Material, stitches = true) {
   if (path.length < 2) return;
   const curve = new THREE.CatmullRomCurve3(path, false, 'centripetal');
   const length = curve.getLength();
   if (length < 0.001) return;
   const ridge = new THREE.TubeGeometry(curve, Math.max(8, Math.ceil(length / 0.003)), 0.00045, 5, false);
   addMesh(group, ridge, fabric).name = 'seam-relief';
+  if (!stitches) return;
   const parts: THREE.BufferGeometry[] = [];
   const count = Math.floor(length / 0.0032);
   for (let i = 0; i < count; i++) {
@@ -1450,16 +1475,14 @@ function addSewnDetail(group: THREE.Group, path: THREE.Vector3[], fabric: THREE.
   const merged = mergeGeometries(parts);
   parts.forEach((g) => g.dispose());
   if (merged) {
-    const color = (fabric as THREE.MeshPhysicalMaterial).color.clone().multiplyScalar(0.84);
+    const color = (fabric as THREE.MeshPhysicalMaterial).color.clone().multiplyScalar(0.93);
     addMesh(group, merged, new THREE.MeshPhysicalMaterial({ color, roughness: 0.95, sheen: 0.3 })).name = 'lockstitches';
   }
 }
 
 /**
- * Wooden clothes hanger in the style of a classic shaped shop hanger: white lacquered,
- * gently arched shoulder arms following the shoulder seams, a birch centre block carrying
- * the chrome hook, and a birch trouser bar between the arm tips. The arms and bar bow gently
- * through the depth axis for an ergonomic shoulder profile.
+ * Shaped wooden shop hanger: one-piece arms following the shoulders, a low raised neck where
+ * the chrome hook enters.
  */
 function addHanger(group: THREE.Group, support: ClothSupport, finish: 'white' | 'birch') {
   const { top: hpsY, halfWidth: half } = support;
@@ -1484,74 +1507,56 @@ function addHanger(group: THREE.Group, support: ClothSupport, finish: 'white' | 
     return g;
   };
 
-  // --- arched arms: top edge just under the shoulder seam, sagging a little toward the tips ---
+  // --- arched arms with a low raised neck where the hook enters, as on shaped shop hangers ---
   const topY = (x: number) => hangerHeight(support, x);
-  const armH = (x: number) => 0.03 - 0.007 * (Math.abs(x) / half);
+  // Above the back neckline the wood rises into a rounded peak, the part seen through the collar.
+  const peakW = support.neckWidth * 0.8;
+  const hump = (x: number) => {
+    const t = Math.max(0, 1 - Math.abs(x) / peakW);
+    return 0.022 * t * t * (3 - 2 * t);
+  };
+  const topEdge = (x: number) => topY(x) + hump(x);
+  const armH = (x: number) => 0.026 - 0.008 * (Math.abs(x) / half);
   const arms = new THREE.Shape();
-  const n = 28;
+  const n = 48;
   const tipR = armH(half) / 2;
-  arms.moveTo(-half, topY(-half));
+  arms.moveTo(-half, topEdge(-half));
   for (let i = 1; i <= n; i++) {
     const x = -half + (2 * half * i) / n;
-    arms.lineTo(x, topY(x));
+    arms.lineTo(x, topEdge(x));
   }
   arms.quadraticCurveTo(half + tipR * 1.15, topY(half) - tipR, half, topY(half) - armH(half));
   for (let i = n - 1; i >= 0; i--) {
     const x = -half + (2 * half * i) / n;
     arms.lineTo(x, topY(x) - armH(x));
   }
-  arms.quadraticCurveTo(-half - tipR * 1.15, topY(-half) - tipR, -half, topY(-half));
+  arms.quadraticCurveTo(-half - tipR * 1.15, topY(-half) - tipR, -half, topEdge(-half));
   const bow = (x: number) => hangerDepth(support, x);
   addMesh(group, extrude(arms, bow), body).name = 'hanger-arms';
 
-  // --- birch centre block the hook is screwed into ---
-  const bw = 0.056;
-  const bt = 0.02;
-  const bh = 0.036;
-  const by = topY(bw) - 0.004;
-  const block = new THREE.Shape();
-  block.moveTo(-bw, by);
-  block.lineTo(bw, by);
-  block.lineTo(bw * 0.92, by + 0.004);
-  block.quadraticCurveTo(bt * 1.4, by + bh * 0.78, bt, by + bh);
-  block.lineTo(-bt, by + bh);
-  block.quadraticCurveTo(-bt * 1.4, by + bh * 0.78, -bw * 0.92, by + 0.004);
-  block.closePath();
-  addMesh(group, extrude(block), body);
-
-  // --- trouser bar between the arm tips ---
-  const barY = topY(half) - armH(half) * 0.45;
-  const barPoints = Array.from({ length: 17 }, (_, i) => {
-    const x = -half + 0.01 + ((half * 2 - 0.02) * i) / 16;
-    return V(x, barY, bow(x));
-  });
-  const bar = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(barPoints, false, 'centripetal'), 48, 0.0045, 16, false);
-  addMesh(group, bar, body);
-
-  // --- chrome hook: stem out of the block, "?" curl to one side, ball tip ---
-  const wire = 0.0031;
-  const R = 0.023;
-  const stemBase = by + bh - 0.004;
-  const stemTop = hpsY + 0.052;
+  // --- chrome hook: 5 mm wire, straight stem, "?" curl closing back toward the stem, ball tip ---
+  const wire = 0.0026;
+  const R = 0.024;
+  const stemBase = topEdge(0) - 0.006;
+  const stemTop = topEdge(0) + 0.05;
   const pts: THREE.Vector3[] = [];
-  for (let i = 0; i <= 8; i++) pts.push(V(0, stemBase + ((stemTop - stemBase) * i) / 8, 0));
-  const endA = Math.PI * 1.25;
-  for (let i = 1; i <= 40; i++) {
-    const a = (endA * i) / 40;
+  for (let i = 0; i <= 10; i++) pts.push(V(0, stemBase + ((stemTop - stemBase) * i) / 10, 0));
+  const endA = Math.PI * 1.42;
+  for (let i = 1; i <= 56; i++) {
+    const a = (endA * i) / 56;
     pts.push(V(-R + R * Math.cos(a), stemTop + R * Math.sin(a), 0));
   }
   const hookCurve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-  addMesh(group, new THREE.TubeGeometry(hookCurve, 160, wire, 24), chrome).name = 'chrome-hook';
-  addMesh(group, new THREE.SphereGeometry(wire * 1.3, 16, 12), chrome).position.copy(pts[pts.length - 1]);
-  const ferrule = new THREE.CylinderGeometry(0.0046, 0.0054, 0.008, 16);
-  addMesh(group, ferrule, chrome).position.set(0, stemBase + 0.003, 0);
+  addMesh(group, new THREE.TubeGeometry(hookCurve, 200, wire, 24), chrome).name = 'chrome-hook';
+  addMesh(group, new THREE.SphereGeometry(wire * 1.25, 20, 14), chrome).position.copy(pts[pts.length - 1]);
+  const ferrule = new THREE.CylinderGeometry(0.0042, 0.0052, 0.007, 20);
+  addMesh(group, ferrule, chrome).position.set(0, topEdge(0) + 0.003, 0);
 }
-
 function createBirchTexture(): THREE.DataTexture {
   const width = 256, height = 128;
   const data = new Uint8Array(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    const grain = Math.sin(y * 0.8 + Math.sin(x * 0.024) * 1.8) * 0.035 + Math.sin(y * 2.7 + x * 0.01) * 0.018;
+    const grain = Math.sin(y * 0.8 + Math.sin(x * 0.024) * 1.8) * 0.014 + Math.sin(y * 2.7 + x * 0.01) * 0.008;
     const i = (y * width + x) * 4;
     data[i] = (0.91 + grain) * 255; data[i + 1] = (0.86 + grain) * 255;
     data[i + 2] = (0.76 + grain) * 255; data[i + 3] = 255;

@@ -10,8 +10,11 @@ Rozmery modelu sú v metroch.
 - Makro-záhyby sú v geometrii, jemný úplet je v opakovanej normal mape.
 - Odev visí pred plynulým pozadím štúdia; podlaha sa pri odevoch nezobrazuje.
 - Počiatočný strihový tvar sa uvoľní deterministickou PBD simuláciou.
-- Ramienko má hrúbku 13 mm, bevel 3 mm a dopredné prehnutie ramien 12 mm.
-  Jeho kolízny profil používa rovnaké prehnutie.
+- Ramienko je jeden plochý diel s hrúbkou 13 mm a bevelom 3 mm. Ramená kopírujú sklon
+  pliec. V strede sa drevo dvíha do zaobleného vrcholu, ktorý vidno cez výstrih.
+  Chrómový hák má drôt 5 mm, rovnú stopku a zahnutý oblúk s guľôčkou na konci.
+- Výstrih je pri simulácii pripnutý v nakreslenom tvare, pretože ho drží rebrový lem.
+  Plecia na ramienku dostanú oproti strihu ďalší sklon približne 12°.
 - Povrch ramienka: matná biela alebo breza, samostatný kovový materiál
   `hanger-chrome` má metalness 1 a roughness 0,1.
 

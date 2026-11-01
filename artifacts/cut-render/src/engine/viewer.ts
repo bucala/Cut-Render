@@ -533,7 +533,9 @@ export class Viewer {
     const aspect = Math.max(this.camera.aspect, 0.5);
     const fit = r / Math.sin(fov / 2) / Math.min(1, aspect);
     const dist = fit * 1.08;
-    const dir = new THREE.Vector3(0.9, 0.62, 1.25).normalize();
+    // Garments are product shots: start almost frontal, not from the three-quarter overhead view.
+    const garment = this.content?.userData.kind === 'garment';
+    const dir = (garment ? new THREE.Vector3(0.22, 0.08, 1) : new THREE.Vector3(0.9, 0.62, 1.25)).normalize();
     this.controls.target.copy(sphere.center);
     this.camera.position.copy(sphere.center).addScaledVector(dir, dist);
     // a tight near/far range keeps depth precision high enough for thin board on 16-bit depth buffers
