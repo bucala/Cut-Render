@@ -29,7 +29,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec tsc --build lib/db lib/api-zod
+      - run: pnpm run typecheck:libs
       - run: pnpm --filter @workspace/api-server typecheck
       - run: pnpm --filter @workspace/cut-render typecheck
       - run: node --experimental-strip-types --test artifacts/api-server/tests/*.test.mjs
