@@ -24,19 +24,36 @@ Rozmery modelu sú v metroch.
 
 ## Parametre štúdia
 
-Implementácia je v `artifacts/cut-render/src/engine/garment-stage.ts`.
-Pozície a rozmery sú lokálne voči skupine štúdia, ktorá sa škáluje polomerom modelu.
+Implementácia je v `artifacts/cut-render/src/engine/garment-stage.ts`, štýly prostredí
+v `ENV_SPECS` v `viewer.ts`. Pozície sú lokálne voči skupine štúdia, ktorá sa škáluje
+polomerom modelu.
 
-| Svetlo | Farba | Intenzita | Pozícia | Rozmery |
-| --- | --- | --- | --- | --- |
-| Hlavný softbox, RectAreaLight | `#fff7ed` | 2,4 | `(-3, 5, 3)` | `2 × 2,8` |
-| Výplň, RectAreaLight | `#e9f1ff` | 0,7 | `(3.5, 2, 2)` | `2,4 × 3` |
-| Gobo, SpotLight | `#fff5e8` | 0,9 pri zapnutí | `(-2.5, 3, 2.5)` | uhol 0,42 rad |
+Pri odevoch prostredie neurčuje len HDRI odrazy. Mení aj farbu steny, farbu, silu
+a smer hlavného svetla, výplň a zadné svetlo:
 
-Gobo používa skutočné listové clony, nie premietnutý obrázok. Svetlo má penumbra 0,7,
-shadow mapu 2048² a shadow radius 3. Prepínač je v karte **Render → Odevné štúdio**.
-V path tracingu rozmazanie tieňov závisí od veľkosti zdroja; shadow radius patrí
-do rasterizačného náhľadu.
+| Prostredie | Stena | Hlavné svetlo | Zvláštnosť |
+| --- | --- | --- | --- |
+| Fotoštúdio | `#d5d1c8` | teplé biele zhora zľava | neutrálne |
+| Okno | `#c3cbc6` | chladné denné zboku | pásy svetla z okna |
+| Softbox | `#efeeea` | biele, silná výplň | ploché a svetlé |
+| Dielňa | `#9a8068` | teplé žiarovkové | teplé zadné svetlo |
+| Zlatá hodinka | `#c2a28c` | nízke oranžové | teplé pásy z okna |
+| Nočný showroom | `#252931` | úzke chladné | silné modré zadné svetlo |
+
+Softboxy (RectAreaLight) v náhľade nevrhajú tiene. Preto pri hlavnom softboxe svieti
+SpotLight s mäkkým tieňom, ktorý vrhá tiene rukávov a ramienka na odev aj na stenu.
+
+Svetelný vzor v karte **Render → Odevné štúdio**: *Žiadny*, *Listy* (veľké mäkké tiene listov)
+alebo *Okno* (okenné tabule, ktoré vrhajú šikmé pásy svetla cez odev aj stenu). Oba vzory
+tvoria skutočné prekážky pred svetlom, nie premietnutý obrázok.
+
+## Zobrazenie: realistické a marketingové
+
+- **Realistické**: odev visí pod vlastnou váhou, stena má farbu prostredia.
+- **Marketingové**: odev má plný objem ako na fotke s neviditeľnou figurínou
+  (tričko 4,2×, mikina 3,6×, sukňa 3,2×, taška 2,6×, nohavice 2,4× hlbšie vrstvy),
+  záhyby sú pokojnejšie (45 %), stena má svetlý, menej sýty odtieň farby odevu
+  a svetlo je kontrastnejšie (menej výplne, silnejší hlavný zdroj).
 
 Viewer používa procedurálne HDR prostredie, predvolene `studio`, expozíciu 1,
 lineárny výpočet osvetlenia a sRGB výstup. Path tracer má 6 odrazov a výstup

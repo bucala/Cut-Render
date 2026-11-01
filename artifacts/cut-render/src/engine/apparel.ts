@@ -869,10 +869,14 @@ export interface GarmentObjectOptions {
   knitSize?: number;
   fabricStrength?: number;
   sheen?: number;
+  /** 'marketing' fills the garment out like a ghost-mannequin catalogue shot, with calmer folds. */
+  presentation?: 'realistic' | 'marketing';
 }
 
 /** Wrinkle multiplier for the garment currently being built (set by buildGarmentObject). */
 let FOLD_K = 1;
+/** Layer depth multiplier for the garment currently being built; marketing shots carry more volume. */
+let VOLUME_K = 1;
 
 /** Print surface on a pattern-built mesh: every vertex carries its panel coordinates (mm). */
 interface MeshPrintSurface {
@@ -936,7 +940,7 @@ type SegList = Float64Array;
 /** unsigned distance of a layer from the mid-plane (mm) */
 function shellDepth(s: ShellSpec, q: Point, back: boolean): number {
   const d = distToSegs(q.x, q.y, s.closed);
-  let z = s.depth * s.profile(q) * roundProfile(d / s.roll);
+  let z = s.depth * VOLUME_K * s.profile(q) * roundProfile(d / (s.roll * VOLUME_K ** 0.8));
   if (s.creases.length) z *= 1 - 0.12 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 7) ** 2));
   return z + s.fold(q, back) * FOLD_K * smoothstep(0, 45, d);
 }
@@ -1769,7 +1773,11 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
   outer.name = 'garment';
   const group = new THREE.Group();
   outer.add(group);
-  FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1));
+  const marketing = options.presentation === 'marketing';
+  FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1)) * (marketing ? 0.45 : 1);
+  // Ghost-mannequin fullness: a body is about a third as deep as it is wide; legs, skirts and bags less.
+  const volume: Partial<Record<GarmentId, number>> = { tshirt: 4.2, hoodie: 3.6, trousers: 2.4, skirt: 3.2, tote: 2.6 };
+  VOLUME_K = marketing ? volume[p.garment] ?? 3 : 1;
   let surfaces: MeshPrintSurface[] = [];
   switch (p.garment) {
     case 'hoodie':
@@ -1788,6 +1796,7 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
       surfaces = buildTop(group, p, mat, false, !!options.hanger, options.hangerFinish ?? 'white');
   }
   FOLD_K = 1;
+  VOLUME_K = 1;
 
   // printed artwork: one transparent overlay per panel, redrawn in place when layers change
   const prints: { tex: PanelTexture; meshes: THREE.Mesh[] }[] = [];
@@ -1817,5 +1826,6 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
   const c = box.getCenter(new THREE.Vector3());
   group.position.set(-c.x, -box.min.y + 0.002, -c.z);
   outer.userData.kind = 'garment';
+  outer.userData.fabricColor = `#${mat.color.getHexString()}`;
   return outer;
 }

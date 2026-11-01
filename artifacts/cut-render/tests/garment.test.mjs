@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { settleCloth, hangerHeight, hangerDepth } from '../src/engine/cloth-drape.ts';
 import { applyFabricDetail } from '../src/engine/fabric-detail.ts';
+import { GarmentStage, marketingBackdrop } from '../src/engine/garment-stage.ts';
 
 const support = { top: 0.7, neckWidth: 0.07, halfWidth: 0.2, slope: 0.2 };
 function panel(back) {
@@ -103,4 +104,31 @@ test('fabric map uses physical metre UVs and respects strength, spacing and shee
     assert.equal(data[i], 127); assert.equal(data[i + 1], 127); assert.equal(data[i + 2], 255);
   }
   material.normalMap.dispose(); material.dispose();
+});
+
+test('marketing backdrop keeps the garment hue, lighter and calmer', () => {
+  const green = new THREE.Color('#4f7a5a');
+  const a = { h: 0, s: 0, l: 0 }, b = { h: 0, s: 0, l: 0 };
+  green.getHSL(a); marketingBackdrop(green).getHSL(b);
+  assert.ok(Math.abs(a.h - b.h) < 0.01);
+  assert.ok(b.l > a.l && b.s < a.s);
+});
+
+test('garment stage switches light patterns and follows the environment style', () => {
+  const stage = new GarmentStage();
+  stage.fit(1, true);
+  stage.setGobo('window');
+  assert.ok(stage.panes.visible && stage.shaftLight.intensity > 0 && !stage.leaves.visible);
+  stage.setGobo('leaves');
+  assert.ok(stage.leaves.visible && !stage.panes.visible);
+  stage.setGobo(false);
+  assert.ok(!stage.leaves.visible && !stage.panes.visible);
+  stage.setStyle({ wall: '#252931', key: { color: '#dfe9ff', intensity: 1.5, position: [-2.5, 5, 2] },
+    fill: { color: '#7e8db8', intensity: 0.15, position: [3.5, 2, 2] }, shafts: { color: '#ffaa5e', intensity: 1.3 } });
+  assert.equal(stage.wallColor().getHexString(), new THREE.Color('#252931').getHexString());
+  assert.ok(stage.panes.visible, 'environment window light shows without a user pattern');
+  stage.setPresentation('marketing', new THREE.Color('#4f7a5a'));
+  assert.equal(stage.wallColor().getHexString(), marketingBackdrop(new THREE.Color('#4f7a5a')).getHexString());
+  assert.ok(stage.shadowKey.castShadow && stage.shadowKey.intensity > 0);
+  stage.dispose();
 });

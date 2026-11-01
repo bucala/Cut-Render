@@ -37,8 +37,8 @@ import {
 } from '@/lib/sk';
 import { cn } from '@/lib/utils';
 
-type RS = VisualizerSettings & { color: string | null; showPieces: boolean; wrinkles: number; hanger: boolean; hangerFinish: 'white' | 'birch'; knitSize: number; fabricStrength: number; sheen: number; gobo: boolean };
-const RS_DEFAULT: RS = { environment: 'studio', exposure: 1, pathTracing: true, maxSamples: 512, showGround: true, autoRotate: false, color: null, showPieces: true, wrinkles: 1, hanger: true, hangerFinish: 'white', knitSize: 0.8, fabricStrength: 0.65, sheen: 0.45, gobo: false, textures: true, normalMaps: true, roughness: null, metalness: null, shadowQuality: 'soft' };
+type RS = VisualizerSettings & { color: string | null; showPieces: boolean; wrinkles: number; hanger: boolean; hangerFinish: 'white' | 'birch'; knitSize: number; fabricStrength: number; sheen: number; gobo: boolean; goboPattern: 'leaves' | 'window'; presentation: 'realistic' | 'marketing' };
+const RS_DEFAULT: RS = { environment: 'studio', exposure: 1, pathTracing: true, maxSamples: 512, showGround: true, autoRotate: false, color: null, showPieces: true, wrinkles: 1, hanger: true, hangerFinish: 'white', knitSize: 0.8, fabricStrength: 0.65, sheen: 0.45, gobo: false, goboPattern: 'leaves', presentation: 'realistic', textures: true, normalMaps: true, roughness: null, metalness: null, shadowQuality: 'soft' };
 
 /** Common garment fabric colours. */
 const FABRIC_SWATCHES: { c: string; n: string }[] = [
@@ -326,7 +326,8 @@ function Workspace({ project }: { project: Project }) {
   useEffect(() => { if (viewer) try { viewer.setShowGround(rs.showGround); } catch { /* */ } }, [viewer, rs.showGround]);
   useEffect(() => { if (viewer) try { viewer.setAutoRotate(rs.autoRotate); } catch { /* */ } }, [viewer, rs.autoRotate]);
   useEffect(() => { viewer?.setShadowQuality(rs.shadowQuality); }, [viewer, rs.shadowQuality]);
-  useEffect(() => { viewer?.setGobo(type === 'apparel' && rs.gobo); }, [viewer, type, rs.gobo]);
+  useEffect(() => { viewer?.setGobo(type === 'apparel' && rs.gobo ? rs.goboPattern : 'off'); }, [viewer, type, rs.gobo, rs.goboPattern]);
+  useEffect(() => { viewer?.setGarmentPresentation(rs.presentation); }, [viewer, rs.presentation]);
   useEffect(() => {
     viewer?.setMaterialControls({ textures: rs.textures, normalMaps: rs.normalMaps, roughness: rs.roughness, metalness: rs.metalness });
   }, [viewer, rs.textures, rs.normalMaps, rs.roughness, rs.metalness]);
@@ -339,7 +340,7 @@ function Workspace({ project }: { project: Project }) {
     if (type === 'ppf' && !model) return;
     const timer = window.setTimeout(() => { try {
       const obj = type === 'packaging' ? buildBoxObject(params as unknown as BoxParams, materialId, { fold, color: rs.color })
-        : type === 'apparel' ? buildGarmentObject(params as unknown as GarmentParams, materialId, { color: rs.color, artwork: artworkRef.current, wrinkles: rs.wrinkles, hanger: rs.hanger, hangerFinish: rs.hangerFinish, knitSize: rs.knitSize, fabricStrength: rs.fabricStrength, sheen: rs.sheen })
+        : type === 'apparel' ? buildGarmentObject(params as unknown as GarmentParams, materialId, { color: rs.color, artwork: artworkRef.current, wrinkles: rs.wrinkles, hanger: rs.hanger, hangerFinish: rs.hangerFinish, knitSize: rs.knitSize, fabricStrength: rs.fabricStrength, sheen: rs.sheen, presentation: rs.presentation })
         : buildPpfObject(model!, ppf, params as unknown as PpfParams, materialId, { showPieces: rs.showPieces, color: rs.color });
       viewer.setContent(obj, { frame: !framed.current });
       contentRef.current = obj;
@@ -347,7 +348,7 @@ function Workspace({ project }: { project: Project }) {
     } catch (e) { setBuildErr(engineError(e)); } }, type === 'apparel' ? 120 : 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewer, type, paramsKey, materialId, rs.color, rs.showPieces, rs.wrinkles, rs.hanger, rs.hangerFinish, rs.knitSize, rs.fabricStrength, rs.sheen, fold, model, ppf]);
+  }, [viewer, type, paramsKey, materialId, rs.color, rs.showPieces, rs.wrinkles, rs.hanger, rs.hangerFinish, rs.knitSize, rs.fabricStrength, rs.sheen, rs.presentation, fold, model, ppf]);
 
   // redraw the print textures in place (no geometry rebuild) when layers change or images/fonts arrive
   const artworkKey = JSON.stringify(artwork);
@@ -711,13 +712,23 @@ function Workspace({ project }: { project: Project }) {
 
           {tab === 'render' && (<>
             {type === 'apparel' && <Section title="Odevné štúdio">
-              <label className="flex items-center justify-between text-sm mb-3">Tiene listov na pozadí<Switch checked={rs.gobo} onCheckedChange={(v) => setR('gobo', v)} data-testid="switch-gobo" /></label>
+              <div className="text-xs text-muted-foreground mb-1">Zobrazenie</div>
+              <Seg id="presentation" value={rs.presentation} onChange={(v) => setR('presentation', v as RS['presentation'])}
+                options={[{ v: 'realistic', l: 'Realistické' }, { v: 'marketing', l: 'Marketingové' }]} />
+              <p className="text-xs text-muted-foreground mt-1 mb-3">{rs.presentation === 'marketing'
+                ? 'Plný objem ako na katalógovej fotke, pokojnejšie záhyby a pozadie vo farbe odevu.'
+                : 'Odev visí pod vlastnou váhou, ako na skutočnej fotke.'}</p>
+              <div className="text-xs text-muted-foreground mb-1">Svetelný vzor</div>
+              <Seg id="gobo" value={rs.gobo ? rs.goboPattern : 'off'} onChange={(v) => {
+                if (v === 'off') setR('gobo', false);
+                else { setR('gobo', true); setR('goboPattern', v as RS['goboPattern']); }
+              }} options={[{ v: 'off', l: 'Žiadny' }, { v: 'leaves', l: 'Listy' }, { v: 'window', l: 'Okno' }]} />
               {params.garment !== 'tote' && params.garment !== 'trousers' && params.garment !== 'skirt' && <>
                 <label className="flex items-center justify-between text-sm mb-3">Ramienko<Switch checked={rs.hanger} onCheckedChange={(v) => setR('hanger', v)} data-testid="switch-studio-hanger" /></label>
                 {rs.hanger && <Seg id="hanger-finish" value={rs.hangerFinish} onChange={(v) => setR('hangerFinish', v)}
                   options={[{ v: 'white', l: 'Biela matná' }, { v: 'birch', l: 'Prírodná breza' }]} />}
               </>}
-              <p className="text-xs text-muted-foreground">Plošné softboxy a mäkké štúdiové svetlo. Vrásky a štruktúru vlákien upravíte v karte Materiál.</p>
+              <p className="text-xs text-muted-foreground">Farbu steny a svetiel určuje zvolené prostredie. Vrásky a štruktúru vlákien upravíte v karte Materiál.</p>
             </Section>}
             <VisualizerPanel settings={rs} onChange={setR} stats={stats}
               onSnapshot={snapshot} onStudioRender={() => saveSnapshot(true)} busy={snapBusy}

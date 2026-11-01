@@ -4,7 +4,7 @@ import { WebGLPathTracer } from 'three-gpu-pathtracer';
 import { HdrTransition } from './hdr-transition';
 import { RenderMaterials, DEFAULT_MATERIAL_CONTROLS, type MaterialControls } from './render-materials';
 import { loadLogoTexture, projectLogo } from './projected-logo';
-import { GarmentStage } from './garment-stage';
+import { GarmentStage, type GarmentPresentation, type GoboPattern, type StageStyle } from './garment-stage';
 
 export type EnvironmentId = 'studio' | 'window' | 'softbox' | 'workshop' | 'sunset' | 'night';
 export type ShadowQuality = 'off' | 'hard' | 'soft';
@@ -60,6 +60,8 @@ interface EnvSpec {
   ground: { color: string; roughness: number; metalness?: number; clearcoat?: number };
   key: { az: number; el: number; intensity: number; color: string };
   envIntensity: number;
+  /** Backdrop and lights of the garment studio; garments hide the ground and key light. */
+  stage: StageStyle;
 }
 
 const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
@@ -71,6 +73,12 @@ const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
     ],
     background: '#526457', ground: { color: '#657367', roughness: 0.92 },
     key: { az: -55, el: 28, intensity: 2, color: '#e0efff' }, envIntensity: 1,
+    stage: {
+      wall: '#c3cbc6',
+      key: { color: '#e3eeff', intensity: 2.1, position: [-4, 3.2, 1.5] },
+      fill: { color: '#ffe6c8', intensity: 0.32, position: [3.5, 1.5, 2.5] },
+      shafts: { color: '#f2f7ff', intensity: 1.3 },
+    },
   },
   studio: {
     top: [0.16, 0.16, 0.17],
@@ -86,6 +94,11 @@ const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
     ground: { color: '#2f3237', roughness: 0.82 },
     key: { az: -50, el: 32, intensity: 1.6, color: '#fff8f0' },
     envIntensity: 1,
+    stage: {
+      wall: '#d5d1c8',
+      key: { color: '#fff7ed', intensity: 2.4, position: [-3, 5, 3] },
+      fill: { color: '#e9f1ff', intensity: 0.7, position: [3.5, 2, 2] },
+    },
   },
   softbox: {
     top: [0.95, 0.95, 0.95],
@@ -100,6 +113,12 @@ const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
     ground: { color: '#e8e7e3', roughness: 0.9 },
     key: { az: -30, el: 60, intensity: 0.9, color: '#ffffff' },
     envIntensity: 0.85,
+    stage: {
+      wall: '#efeeea',
+      key: { color: '#ffffff', intensity: 1.7, position: [-1.5, 5, 3.5] },
+      fill: { color: '#ffffff', intensity: 1, position: [3, 2.5, 3] },
+      rim: { color: '#ffffff', intensity: 0.6 },
+    },
   },
   workshop: {
     top: [0.28, 0.2, 0.13],
@@ -116,6 +135,12 @@ const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
     ground: { color: '#4a3828', roughness: 0.62, clearcoat: 0.2 },
     key: { az: 118, el: 20, intensity: 1.4, color: '#e6f0ff' },
     envIntensity: 1,
+    stage: {
+      wall: '#9a8068',
+      key: { color: '#ffcb94', intensity: 2.1, position: [-3, 4, 2.5] },
+      fill: { color: '#cddfff', intensity: 0.45, position: [3.5, 2, 1.5] },
+      rim: { color: '#ffb874', intensity: 1 },
+    },
   },
   sunset: {
     top: [0.12, 0.2, 0.42],
@@ -129,6 +154,13 @@ const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
     ground: { color: '#3a302b', roughness: 0.7 },
     key: { az: -35, el: 8, intensity: 2.4, color: '#ffb066' },
     envIntensity: 1,
+    stage: {
+      wall: '#c2a28c',
+      key: { color: '#ffbd88', intensity: 2, position: [-4.5, 1.8, 2.5] },
+      fill: { color: '#8da4d6', intensity: 0.4, position: [3, 3, 2] },
+      rim: { color: '#ff9a55', intensity: 0.8 },
+      shafts: { color: '#ffb46e', intensity: 1.3 },
+    },
   },
   night: {
     top: [0.012, 0.014, 0.02],
@@ -143,6 +175,12 @@ const ENV_SPECS: Record<EnvironmentId, EnvSpec> = {
     ground: { color: '#0c0e12', roughness: 0.28, clearcoat: 1 },
     key: { az: -40, el: 55, intensity: 1.2, color: '#dfe9ff' },
     envIntensity: 1,
+    stage: {
+      wall: '#252931',
+      key: { color: '#dfe9ff', intensity: 1.5, position: [-2.5, 5, 2] },
+      fill: { color: '#7e8db8', intensity: 0.15, position: [3.5, 2, 2] },
+      rim: { color: '#9fc4ff', intensity: 2.4 },
+    },
   },
 };
 
@@ -258,6 +296,7 @@ export class Viewer {
   private keyLight: THREE.DirectionalLight;
   private garmentStage = new GarmentStage();
   private envId: EnvironmentId = 'studio';
+  private presentation: GarmentPresentation = 'realistic';
   private pathTracingEnabled = true;
   private maxSamples = 256;
   private autoRotate = false;
@@ -424,7 +463,11 @@ export class Viewer {
     this.renderer.shadowMap.enabled = quality !== 'off';
     this.renderer.shadowMap.type = quality === 'hard' ? THREE.BasicShadowMap : THREE.PCFSoftShadowMap;
     this.keyLight.castShadow = quality !== 'off';
-    this.garmentStage.goboLight.castShadow = quality !== 'off';
+    for (const light of [this.garmentStage.goboLight, this.garmentStage.shaftLight, this.garmentStage.shadowKey]) {
+      light.castShadow = quality !== 'off';
+      light.shadow.map?.dispose();
+      light.shadow.map = null;
+    }
     this.keyLight.shadow.map?.dispose();
     this.keyLight.shadow.map = null;
     this.scene.traverse((o) => {
@@ -436,10 +479,23 @@ export class Viewer {
     this.touch();
   }
 
-  setGobo(enabled: boolean): void {
-    this.garmentStage.setGobo(enabled);
+  setGobo(pattern: GoboPattern | boolean): void {
+    this.garmentStage.setGobo(pattern);
     this.invalidate();
     this.touch();
+  }
+
+  /** Marketing tints the backdrop with the garment's own colour and uses catalogue lighting. */
+  setGarmentPresentation(mode: GarmentPresentation): void {
+    this.presentation = mode;
+    this.applyPresentation();
+    this.invalidate();
+    this.touch();
+  }
+
+  private applyPresentation() {
+    const color = this.content?.userData.fabricColor as string | undefined;
+    this.garmentStage.setPresentation(this.presentation, color ? new THREE.Color(color) : null);
   }
 
   setMaterialControls(controls: MaterialControls): void {
@@ -751,6 +807,7 @@ export class Viewer {
     this.keyLight.intensity = spec.key.intensity;
     this.positionKeyLight();
     this.container.style.background = spec.background;
+    this.garmentStage.setStyle(spec.stage);
   }
 
   private positionKeyLight() {
@@ -783,6 +840,7 @@ export class Viewer {
     // Hanging garments sit in front of a seamless backdrop, never on a floor.
     this.ground.visible = this.groundWanted && !garment;
     this.garmentStage.fit(this.radius, garment);
+    this.applyPresentation();
   }
 
   private resize() {
