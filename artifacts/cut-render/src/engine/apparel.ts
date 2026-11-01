@@ -1081,8 +1081,8 @@ function closeLoop(pts: Point[]): Point[] {
 
 const mirP = (q: Point): Point => ({ x: -q.x, y: q.y });
 
-/** Extra shoulder slope a hanger adds to the drafted shoulder line (about 12 degrees). */
-const SHOULDER_DROP = 0.22;
+/** Extra shoulder slope a hanger adds to the drafted shoulder line (about 17 degrees). */
+const SHOULDER_DROP = 0.3;
 
 const REGION_BODY = 0;
 const REGION_SLEEVE_POS = 1; // world +x: the wearer's left sleeve
@@ -1515,10 +1515,13 @@ function addHanger(group: THREE.Group, support: ClothSupport, finish: 'white' | 
     const t = Math.max(0, 1 - Math.abs(x) / peakW);
     return 0.022 * t * t * (3 - 2 * t);
   };
-  const topEdge = (x: number) => topY(x) + hump(x);
+  // Classic shop-hanger notches near each tip hold straps; they sit under the shoulder fabric.
+  const notchX = half - 0.03;
+  const notch = (x: number) => 0.006 * Math.max(0, 1 - Math.abs(Math.abs(x) - notchX) / 0.0045);
+  const topEdge = (x: number) => topY(x) + hump(x) - notch(x);
   const armH = (x: number) => 0.026 - 0.008 * (Math.abs(x) / half);
   const arms = new THREE.Shape();
-  const n = 48;
+  const n = 160;
   const tipR = armH(half) / 2;
   arms.moveTo(-half, topEdge(-half));
   for (let i = 1; i <= n; i++) {
@@ -1532,7 +1535,34 @@ function addHanger(group: THREE.Group, support: ClothSupport, finish: 'white' | 
   }
   arms.quadraticCurveTo(-half - tipR * 1.15, topY(-half) - tipR, -half, topEdge(-half));
   const bow = (x: number) => hangerDepth(support, x);
+  const woodBody = finish === 'white' ? new THREE.MeshPhysicalMaterial({ color: 0xe4cfac, map: createBirchTexture(), roughness: 0.64, clearcoat: 0.12, clearcoatRoughness: 0.5 }) : body;
+  woodBody.name = 'hanger-birch';
   addMesh(group, extrude(arms, bow), body).name = 'hanger-arms';
+  if (finish === 'white') {
+    // White shaped hangers carry a birch neck block, slightly proud of the arms on both faces.
+    const blockW = support.neckWidth * 0.9;
+    const block = new THREE.Shape();
+    const m = 24;
+    block.moveTo(-blockW, topEdge(-blockW));
+    for (let i = 1; i <= m; i++) {
+      const x = -blockW + (2 * blockW * i) / m;
+      block.lineTo(x, topEdge(x));
+    }
+    for (let i = m; i >= 0; i--) {
+      const x = -blockW + (2 * blockW * i) / m;
+      block.lineTo(x, topY(x) - 0.012 - 0.006 * (1 - (x / blockW) ** 2));
+    }
+    const g = extrude(block);
+    g.scale(1, 1, 1.15);
+    addMesh(group, g, woodBody).name = 'hanger-neck';
+  }
+  // Trouser bar: a birch dowel between the arm tips, hidden inside the garment.
+  const barY = topY(half) - armH(half) + 0.002;
+  const bar = new THREE.CylinderGeometry(0.0055, 0.0055, 2 * (half - 0.012), 24);
+  bar.rotateZ(Math.PI / 2);
+  const barMesh = addMesh(group, bar, woodBody);
+  barMesh.position.set(0, barY, 0);
+  barMesh.name = 'hanger-bar';
 
   // --- chrome hook: 5 mm wire, straight stem, "?" curl closing back toward the stem, ball tip ---
   const wire = 0.0026;

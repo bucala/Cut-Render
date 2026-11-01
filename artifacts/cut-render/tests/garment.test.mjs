@@ -11,6 +11,18 @@ function panel(back) {
   return { geometry, sewn: (i) => i % 17 === 0 || i % 17 === 16 };
 }
 
+test('long hanging panels keep their drafted length under gravity', () => {
+  const panels = [false, true].map((back) => {
+    const geometry = new THREE.PlaneGeometry(0.36, 0.75, 36, 75);
+    geometry.translate(0, 0.32, back ? -0.014 : 0.014);
+    return { geometry, sewn: (i) => i % 37 === 0 || i % 37 === 36 };
+  });
+  const before = Math.min(...panels[0].geometry.attributes.position.array.filter((_, i) => i % 3 === 1));
+  settleCloth(panels, support);
+  const after = Math.min(...panels[0].geometry.attributes.position.array.filter((_, i) => i % 3 === 1));
+  assert.ok(before - after < 0.015, `hem dropped ${((before - after) * 1000).toFixed(0)} mm`);
+});
+
 test('PBD is finite and deterministic, carries trims, and holds shoulder supports', () => {
   function run() {
     const panels = [panel(false), panel(true)];

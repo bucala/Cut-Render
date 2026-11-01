@@ -11,10 +11,14 @@ Rozmery modelu sú v metroch.
 - Odev visí pred plynulým pozadím štúdia; podlaha sa pri odevoch nezobrazuje.
 - Počiatočný strihový tvar sa uvoľní deterministickou PBD simuláciou.
 - Ramienko je jeden plochý diel s hrúbkou 13 mm a bevelom 3 mm. Ramená kopírujú sklon
-  pliec. V strede sa drevo dvíha do zaobleného vrcholu, ktorý vidno cez výstrih.
+  pliec a pri koncoch majú zárezy na ramienka. V strede sa ramienko dvíha do zaobleného
+  vrcholu, ktorý vidno cez výstrih. Medzi koncami ramien je brezová tyčka na nohavice.
+  Biele ramienko má brezový stred.
   Chrómový hák má drôt 5 mm, rovnú stopku a zahnutý oblúk s guľôčkou na konci.
 - Výstrih je pri simulácii pripnutý v nakreslenom tvare, pretože ho drží rebrový lem.
-  Plecia na ramienku dostanú oproti strihu ďalší sklon približne 12°.
+  Plecia na ramienku dostanú oproti strihu ďalší sklon približne 17°.
+- Každý voľný bod látky má tether k najbližšiemu uchytenému bodu, takže sa odev pod
+  vlastnou váhou nenaťahuje a dĺžka zodpovedá strihu.
 - Povrch ramienka: matná biela alebo breza, samostatný kovový materiál
   `hanger-chrome` má metalness 1 a roughness 0,1.
 

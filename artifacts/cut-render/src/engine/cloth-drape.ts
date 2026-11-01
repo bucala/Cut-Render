@@ -85,6 +85,23 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
       }
     }
   });
+  // Long-range tethers: a few PBD iterations cannot carry tension down a 70 cm panel, so without
+  // them gravity stretched a shirt by over 10 cm. Each free vertex stays within its rest distance
+  // of the nearest held vertex.
+  const held: number[] = [];
+  for (let v = 0; v < count; v++) if (!weight[v]) held.push(v);
+  const anchor = new Int32Array(count).fill(-1);
+  const reach = new Float64Array(count);
+  for (let v = 0; v < count; v++) {
+    if (!weight[v]) continue;
+    let best = Infinity;
+    for (const h of held) {
+      const d = (original[v * 3] - original[h * 3]) ** 2 + (original[v * 3 + 1] - original[h * 3 + 1]) ** 2 +
+        (original[v * 3 + 2] - original[h * 3 + 2]) ** 2;
+      if (d < best) { best = d; anchor[v] = h; }
+    }
+    reach[v] = Math.sqrt(best);
+  }
   const ids = Uint32Array.from(edges);
   const rest = Float64Array.from(rests);
   const strength = Float64Array.from(stiffness);
@@ -110,6 +127,17 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
           const delta = (d === 0 ? dx : d === 1 ? dy : dz) * correction;
           pos[ai + d] += delta * weight[a];
           pos[bi + d] -= delta * weight[b];
+        }
+      }
+      for (let v = 0; v < count; v++) {
+        const h = anchor[v];
+        if (h < 0) continue;
+        const i = v * 3, j = h * 3;
+        const dx = pos[i] - pos[j], dy = pos[i + 1] - pos[j + 1], dz = pos[i + 2] - pos[j + 2];
+        const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (length > reach[v] * 1.01) {
+          const k = reach[v] * 1.01 / length;
+          pos[i] = pos[j] + dx * k; pos[i + 1] = pos[j + 1] + dy * k; pos[i + 2] = pos[j + 2] + dz * k;
         }
       }
       for (let v = 0; v < count; v++) {
