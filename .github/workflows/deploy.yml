@@ -49,7 +49,7 @@ jobs:
             -e CLERK_TELEMETRY_DISABLED=1 \
             -e CLERK_PUBLISHABLE_KEY="$CI_CLERK_PK" cut-render:ci
           trap 'docker logs cut-render-ci; docker rm -f cut-render-ci' EXIT
-          curl --fail --retry 20 --retry-delay 2 --retry-connrefused http://localhost:10000/api/healthz
+          curl --fail --retry 20 --retry-delay 2 --retry-all-errors http://localhost:10000/api/healthz
           curl --fail http://localhost:10000/ -o /tmp/index.html
           grep -q '<div id="root">' /tmp/index.html
           curl --fail http://localhost:10000/projects -o /tmp/projects.html
