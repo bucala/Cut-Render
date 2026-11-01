@@ -6,13 +6,10 @@ import {
 import { Router, type IRouter, type Request, type Response } from 'express';
 
 import { getAuth } from '@clerk/express';
-import {
-  ObjectNotFoundError,
-  ObjectStorageService,
-} from '../lib/objectStorage';
+import { createObjectStore, ObjectNotFoundError } from '../lib/objectStore';
 
 const router: IRouter = Router();
-const objectStorageService = new ObjectStorageService();
+const objectStorageService = createObjectStore();
 
 const MAX_BYTES = 25 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml', 'image/gif']);

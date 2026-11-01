@@ -1,0 +1,89 @@
+name: Validate and deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not interrupt a running database update or deployment with a newer push.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --build lib/db lib/api-zod
+      - run: pnpm --filter @workspace/api-server typecheck
+      - run: pnpm --filter @workspace/cut-render typecheck
+      - run: node --experimental-strip-types --test artifacts/api-server/tests/*.test.mjs
+      - run: pnpm --filter @workspace/cut-render test
+      - name: Create placeholder Clerk key for CI
+        shell: bash
+        # A syntactically valid development key for a non-existent instance; no real credentials.
+        run: echo "CI_CLERK_PK=pk_test_$(printf '%s' 'example.clerk.accounts.dev$' | base64 | tr -d '=')" >> "$GITHUB_ENV"
+      - name: Build production image
+        run: docker build --build-arg VITE_CLERK_PUBLISHABLE_KEY="$CI_CLERK_PK" -t cut-render:ci .
+      - name: Smoke test production image
+        shell: bash
+        run: |
+          docker run --detach --name cut-render-ci --publish 127.0.0.1:10000:10000 \
+            -e DATABASE_URL=postgresql://test:test@localhost:5432/test \
+            -e CLERK_SECRET_KEY=sk_test_smoke_not_a_real_key \
+            -e CLERK_TELEMETRY_DISABLED=1 \
+            -e CLERK_PUBLISHABLE_KEY="$CI_CLERK_PK" cut-render:ci
+          trap 'docker logs cut-render-ci; docker rm -f cut-render-ci' EXIT
+          curl --fail --retry 20 --retry-delay 2 --retry-connrefused http://localhost:10000/api/healthz
+          curl --fail http://localhost:10000/ -o /tmp/index.html
+          grep -q '<div id="root">' /tmp/index.html
+          curl --fail http://localhost:10000/projects -o /tmp/projects.html
+          cmp /tmp/index.html /tmp/projects.html
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:10000/api/not-found)" = 404
+
+  deploy:
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check deployment secrets
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: test -n "$DATABASE_URL" && test -n "$RENDER_DEPLOY_HOOK_URL"
+      - name: Update Neon schema (no forced destructive changes)
+        timeout-minutes: 3
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm --filter @workspace/db push
+      - name: Trigger Render deployment of this commit
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        # Do not print the hook URL or its response. A successful request queues a deploy.
+        run: curl --fail --silent --show-error --output /dev/null --request POST "${RENDER_DEPLOY_HOOK_URL}&ref=${GITHUB_SHA}"

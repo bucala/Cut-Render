@@ -9,6 +9,7 @@ import {
   ObjectPermission,
   setObjectAclPolicy,
 } from './objectAcl';
+import { ObjectNotFoundError } from './r2Storage';
 
 const REPLIT_SIDECAR_ENDPOINT = 'http://127.0.0.1:1106';
 
@@ -30,13 +31,7 @@ export const objectStorageClient = new Storage({
   projectId: '',
 });
 
-export class ObjectNotFoundError extends Error {
-  constructor() {
-    super('Object not found');
-    this.name = 'ObjectNotFoundError';
-    Object.setPrototypeOf(this, ObjectNotFoundError.prototype);
-  }
-}
+export { ObjectNotFoundError };
 
 export class ObjectStorageService {
   constructor() {}

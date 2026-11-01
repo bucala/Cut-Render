@@ -41,6 +41,9 @@ Cut & Render is a browser-based production studio for **apparel patterns, packag
 
 ## Čo to robí
 
+Nasadenie mimo Replitu: [Render + Neon + Cloudflare R2](docs/deployment-render.md)
+vrátane automatického nasadenia z GitHubu a prenosu existujúcich dát.
+
 | | Odevy | Obaly | PPF fólia |
 |---|---|---|---|
 | **Vstup** | strih + veľkosť XS–XXL, voľnosť, rukáv, prídavky | konštrukcia FEFCO/ECMA, rozmery, hrúbka lepenky | vlastný 3D model (STEP, STL, GLB…) alebo ukážka |
