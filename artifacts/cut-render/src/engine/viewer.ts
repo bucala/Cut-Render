@@ -271,6 +271,7 @@ export class Viewer {
   private resizeObserver: ResizeObserver;
   private needsRaster = true;
   private radius = 1;
+  private groundWanted = true;
   private ptFailed = false;
   private materialControls = { ...DEFAULT_MATERIAL_CONTROLS };
   private materials = new RenderMaterials();
@@ -508,8 +509,9 @@ export class Viewer {
   }
 
   setShowGround(visible: boolean): void {
-    if (this.ground.visible === visible) return;
-    this.ground.visible = visible;
+    if (this.groundWanted === visible) return;
+    this.groundWanted = visible;
+    this.ground.visible = visible && this.content?.userData.kind !== 'garment';
     this.invalidate();
   }
 
@@ -776,6 +778,8 @@ export class Viewer {
     this.positionKeyLight();
     const garment = this.content?.userData.kind === 'garment';
     this.keyLight.visible = !garment;
+    // Hanging garments sit in front of a seamless backdrop, never on a floor.
+    this.ground.visible = this.groundWanted && !garment;
     this.garmentStage.fit(this.radius, garment);
   }
 

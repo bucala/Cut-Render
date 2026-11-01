@@ -1,4 +1,6 @@
 import { jsPDF } from 'jspdf';
+import type { Object3D } from 'three';
+import { garmentToGlb } from './garment-export';
 import type { CutPlan, LineKind, LineStyle, PlanPath, PlanPiece, Point } from './types';
 import { artworkDataUrl, artworkSvg, drawArtwork, loadArtworkAssets, type ArtworkLayer, type PanelId } from './artwork';
 
@@ -343,6 +345,13 @@ export function safeFileName(name: string): string {
       .replace(/^-+|-+$/g, '')
       .toLowerCase() || 'cut-plan'
   );
+}
+
+/** Export a self-contained binary glTF of the current garment, including PBR maps. */
+export async function exportGarmentGlb(object: Object3D, baseName: string): Promise<string> {
+  const fileName = safeFileName(baseName) + '.glb';
+  downloadBlob(await garmentToGlb(object), fileName, 'model/gltf-binary');
+  return fileName;
 }
 
 /** Export and trigger a download. Returns the file name used. */

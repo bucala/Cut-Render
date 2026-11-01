@@ -11,11 +11,17 @@ export interface ClothSupport {
   neckWidth: number;
   top: number;
   slope: number;
+  /** Forward curvature at the shoulder tips, in metres. */
+  depthBow?: number;
 }
 
 export function hangerHeight(s: ClothSupport, x: number): number {
   const d = Math.max(0, Math.abs(x) - s.neckWidth * 0.7);
   return s.top - 0.008 - s.slope * d - 0.07 * d * d / s.halfWidth;
+}
+
+export function hangerDepth(s: ClothSupport, x: number): number {
+  return (s.depthBow ?? 0) * (x / s.halfWidth) ** 2;
 }
 
 /**
@@ -64,7 +70,10 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
       const x = original[v * 3], y = original[v * 3 + 1];
       // A narrow support strip, not the whole upper body, holds the shoulder on the wood.
       if (Math.abs(x) >= support.neckWidth && Math.abs(x) <= support.halfWidth &&
-          Math.abs(y - hangerHeight(support, x)) < 0.014) weight[v] = 0;
+          Math.abs(y - hangerHeight(support, x)) < 0.014) {
+        weight[v] = 0;
+        pos[v * 3 + 2] += hangerDepth(support, x);
+      }
       if (panel.sewn(i)) {
         const key = `${Math.round(x * 1e6)}:${Math.round(y * 1e6)}`;
         const other = sewn.get(key);
@@ -105,17 +114,19 @@ export function settleCloth(panels: ClothPanel[], support: ClothSupport) {
         const i = v * 3, x = pos[i];
         if (Math.abs(x) > support.halfWidth + 0.009) continue;
         const cy = hangerHeight(support, x) - 0.013;
-        const dy = (pos[i + 1] - cy) / 0.018, dz = pos[i + 2] / 0.010;
+        const cz = hangerDepth(support, x);
+        const dy = (pos[i + 1] - cy) / 0.018, dz = (pos[i + 2] - cz) / 0.010;
         const r = Math.sqrt(dy * dy + dz * dz);
         if (r < 1) {
           const zSign = original[i + 2] < 0 ? -1 : 1;
           const safe = Math.max(r, 0.0001);
           pos[i + 1] = cy + dy / safe * 0.018;
-          pos[i + 2] = Math.abs(dz) < 1e-7 ? zSign * 0.010 : dz / safe * 0.010;
+          pos[i + 2] = cz + (Math.abs(dz) < 1e-7 ? zSign * 0.010 : dz / safe * 0.010);
         }
         // Two-sided cloth thickness barrier; prevents front/back inversion.
         if (Math.abs(original[i + 2]) > 0.001)
-          pos[i + 2] = Math.sign(original[i + 2]) * Math.max(0.0007, Math.sign(original[i + 2]) * pos[i + 2]);
+          pos[i + 2] = cz + Math.sign(original[i + 2]) *
+            Math.max(0.0007, Math.sign(original[i + 2]) * (pos[i + 2] - cz));
       }
     }
   }

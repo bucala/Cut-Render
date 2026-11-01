@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { hangerHeight, settleCloth, type ClothPanel } from './cloth-drape';
+import { hangerHeight, hangerDepth, settleCloth, type ClothPanel, type ClothSupport } from './cloth-drape';
 import { applyFabricDetail } from './fabric-detail';
 import type { CutPlan, PlanLabel, PlanPath, PlanPiece, Point } from './types';
 import { bezier, boundsOf, centroid, mirrorX, pieceColor, polygonArea, polylineLength, rotatePoints, translatePoints } from './geom';
@@ -1139,7 +1139,10 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     wy = -wy;
   }
   // on a hanger the sleeves hang lower than in the flat lay: pivot about the shoulder point
-  const poseAngle = (longSleeve ? 46 : 30) * (Math.PI / 180);
+  const poseAngle = (longSleeve ? 58 : 40) * (Math.PI / 180);
+  // The fold edge hangs lower than the underarm seam, which stays clear of the body side seam.
+  // Capped so the fold edge never moves more than a third of the sleeve width toward the seam.
+  const droop = Math.min(14 * (Math.PI / 180), Math.asin(Math.min(1, (0.35 * hw2) / sLen)));
   const natural = Math.atan2(sinL * uy + cosL * wy, sinL * ux + cosL * wx);
   const rot = Math.max(0, poseAngle - natural);
   const rotate = (x: number, y: number): [number, number] => [x * Math.cos(rot) - y * Math.sin(rot), x * Math.sin(rot) + y * Math.cos(rot)];
@@ -1155,7 +1158,10 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const ease = (yl: number) => (yl <= ch ? 1 : 1 - smoothstep(ch, sLen, yl));
   const warp = (xl: number, yl: number): Point => {
     const w = (xl / bw2) * ease(yl);
-    return { x: SP.x + nX * xl + dX * yl + eX * w, y: SP.y + nY * xl + dY * yl + eY * w };
+    const phi = droop * Math.max(0, 1 - xl / hw2) * smoothstep(ch, sLen, yl);
+    const lx = nX * xl + dX * yl, ly = nY * xl + dY * yl;
+    const c = Math.cos(phi), s = Math.sin(phi);
+    return { x: SP.x + lx * c - ly * s + eX * w, y: SP.y + lx * s + ly * c + eY * w };
   };
   const unwarp = (q: Point): [number, number] => {
     let xl = (q.x - SP.x) * nX + (q.y - SP.y) * nY;
@@ -1218,25 +1224,31 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
       ...(hemBand ? [bandSideR, mir(bandSideR)] : []),
     ]),
     creases: segsOf(constraints),
-    depth: hoodie ? 34 : 28,
-    roll: 70,
+    // A hanging top is nearly flat; a deep, wide roll reads as a padded pillow.
+    depth: hoodie ? 24 : 17,
+    roll: 38,
     profile: (q) => 1 - 0.25 * Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad))),
     fold: (q, back) => {
       const inBody = pointInPolygon(q.x, q.y, back ? bodyPolyB : bodyPolyF);
       if (inBody) {
-        const ph = back ? 1.7 : 0;
-        const tt = smoothstep(ad * 0.6, yBot, q.y);
-        let w =
-          0.55 * Math.sin((2 * Math.PI * q.x) / (0.42 * W) + 0.8 + ph + q.y * 0.0025) +
-          0.3 * Math.sin((2 * Math.PI * q.x) / (0.21 * W) + 2.1 + 1.3 * ph + q.y * 0.004) +
-          0.15 * Math.sin((2 * Math.PI * q.x) / (0.11 * W) + 4.2 + ph);
-        w *= 1.2 + 4.3 * tt;
-        // soft tension folds running from the underarm toward the hem
-        for (const seg of tension) w += 2.2 * Math.exp(-((distToSegs(q.x, q.y, seg) / 28) ** 2)) * smoothstep(0, 120, q.y - ad) * (1 - 0.5 * tt);
+        const phase = back ? 1.1 : 0;
+        const drop = smoothstep(ad + 24, yBot, q.y);
+        // A small number of broad, gravity-led folds. Fine yarn relief stays in the normal map.
+        let w = (
+          2.1 * Math.sin((2 * Math.PI * q.x) / (0.68 * W) + q.y * 0.0022 + phase) +
+          0.9 * Math.sin((2 * Math.PI * q.x) / (0.42 * W) - q.y * 0.0014 + phase + 1.3)
+        ) * (0.2 + 0.8 * drop);
+        // Soft diagonal tension folds falling from each underarm toward the hem.
+        for (const seg of tension) w += 1.8 * Math.exp(-((distToSegs(q.x, q.y, seg) / 38) ** 2)) *
+          smoothstep(0, 120, q.y - ad) * (1 - 0.4 * drop);
         return w;
       }
       const [xl, yl] = sleeveLocal(q);
-      return Math.sin(yl / 26 + (back ? 1.1 : 0) + xl * 0.012) * 2 * smoothstep(ch * 0.5, sLen, yl);
+      const sleeveDrop = smoothstep(ch * 0.5, sLen, yl);
+      return (
+        1.5 * Math.sin(yl / 82 + xl * 0.003 + (back ? 0.8 : 0)) +
+        0.55 * Math.sin(yl / 145 - xl * 0.002 + (back ? 1.7 : 0.4))
+      ) * sleeveDrop;
     },
     topW: yBot + 10,
   };
@@ -1380,7 +1392,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   }
 
   const slope = (SP.y - shoulderR[0].y) / (SP.x - nw);
-  const support = { top: spec.topW / 1000, neckWidth: nw / 1000, halfWidth: Math.min(SP.x / 1000 - 0.028, 0.225), slope };
+  const support = { top: spec.topW / 1000, neckWidth: nw / 1000, halfWidth: Math.min(SP.x / 1000 - 0.028, 0.225), slope, depthBow: 0.012 };
   const settled = settleCloth(cloth, support);
   const shells = new Set(cloth.map((c) => c.geometry));
   const vertex = new THREE.Vector3();
@@ -1416,7 +1428,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     colors.needsUpdate = true;
   }
   group.userData.cloth = { particles: settled.particles, constraints: settled.constraints };
-  if (hanger) addHanger(group, support.top, support.neckWidth, SP.x / 1000, slope, finish);
+  if (hanger) addHanger(group, support, finish);
   return surfaces;
 }
 
@@ -1446,10 +1458,12 @@ function addSewnDetail(group: THREE.Group, path: THREE.Vector3[], fabric: THREE.
 /**
  * Wooden clothes hanger in the style of a classic shaped shop hanger: white lacquered,
  * gently arched shoulder arms following the shoulder seams, a birch centre block carrying
- * the chrome hook, and a birch trouser bar between the arm tips. Everything is coplanar.
+ * the chrome hook, and a birch trouser bar between the arm tips. The arms and bar bow gently
+ * through the depth axis for an ergonomic shoulder profile.
  */
-function addHanger(group: THREE.Group, hpsY: number, nw: number, sh: number, slope: number, finish: 'white' | 'birch') {
-  const chrome = new THREE.MeshPhysicalMaterial({ color: 0xd8dce2, metalness: 1, roughness: 0.16 });
+function addHanger(group: THREE.Group, support: ClothSupport, finish: 'white' | 'birch') {
+  const { top: hpsY, halfWidth: half } = support;
+  const chrome = new THREE.MeshPhysicalMaterial({ name: 'hanger-chrome', color: 0xd8dce2, metalness: 1, roughness: 0.1 });
   const wood = createBirchTexture();
   const body = new THREE.MeshPhysicalMaterial(finish === 'white'
     ? { color: 0xf3f1ec, roughness: 0.78, clearcoat: 0.08, clearcoatRoughness: 0.65 }
@@ -1458,17 +1472,20 @@ function addHanger(group: THREE.Group, hpsY: number, nw: number, sh: number, slo
   body.name = `hanger-${finish}`;
   const thick = 0.013;
   const bevel = 0.003;
-  const extrude = (shape: THREE.Shape) => {
+  const extrude = (shape: THREE.Shape, depthBow: (x: number) => number = () => 0) => {
     const g = new THREE.ExtrudeGeometry(shape, { depth: thick - 2 * bevel, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 8, curveSegments: 32 });
     g.translate(0, 0, -(thick - 2 * bevel) / 2);
+    const position = g.getAttribute('position');
+    for (let i = 0; i < position.count; i++) {
+      position.setZ(i, position.getZ(i) + depthBow(position.getX(i)));
+    }
+    position.needsUpdate = true;
     g.computeVertexNormals();
     return g;
   };
 
   // --- arched arms: top edge just under the shoulder seam, sagging a little toward the tips ---
-  const half = Math.min(sh - 0.028, 0.225);
-  const topC = hpsY - 0.008;
-  const topY = (x: number) => hangerHeight({ top: topC + 0.008, neckWidth: nw, halfWidth: half, slope }, x);
+  const topY = (x: number) => hangerHeight(support, x);
   const armH = (x: number) => 0.03 - 0.007 * (Math.abs(x) / half);
   const arms = new THREE.Shape();
   const n = 28;
@@ -1484,7 +1501,8 @@ function addHanger(group: THREE.Group, hpsY: number, nw: number, sh: number, slo
     arms.lineTo(x, topY(x) - armH(x));
   }
   arms.quadraticCurveTo(-half - tipR * 1.15, topY(-half) - tipR, -half, topY(-half));
-  addMesh(group, extrude(arms), body).name = 'hanger-arms';
+  const bow = (x: number) => hangerDepth(support, x);
+  addMesh(group, extrude(arms, bow), body).name = 'hanger-arms';
 
   // --- birch centre block the hook is screwed into ---
   const bw = 0.056;
@@ -1503,9 +1521,12 @@ function addHanger(group: THREE.Group, hpsY: number, nw: number, sh: number, slo
 
   // --- trouser bar between the arm tips ---
   const barY = topY(half) - armH(half) * 0.45;
-  const bar = new THREE.CylinderGeometry(0.0045, 0.0045, half * 2 - 0.02, 32);
-  bar.rotateZ(Math.PI / 2);
-  addMesh(group, bar, body).position.set(0, barY, 0);
+  const barPoints = Array.from({ length: 17 }, (_, i) => {
+    const x = -half + 0.01 + ((half * 2 - 0.02) * i) / 16;
+    return V(x, barY, bow(x));
+  });
+  const bar = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(barPoints, false, 'centripetal'), 48, 0.0045, 16, false);
+  addMesh(group, bar, body);
 
   // --- chrome hook: stem out of the block, "?" curl to one side, ball tip ---
   const wire = 0.0031;

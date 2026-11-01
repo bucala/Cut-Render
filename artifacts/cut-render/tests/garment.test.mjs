@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { settleCloth, hangerHeight } from '../src/engine/cloth-drape.ts';
+import { settleCloth, hangerHeight, hangerDepth } from '../src/engine/cloth-drape.ts';
 import { applyFabricDetail } from '../src/engine/fabric-detail.ts';
 
 const support = { top: 0.7, neckWidth: 0.07, halfWidth: 0.2, slope: 0.2 };
@@ -48,6 +48,30 @@ test('sewn front and back boundary pairs converge without closing the open hem',
   assert.ok(Math.abs(a.getZ(17 * 24 + 8) - b.getZ(17 * 24 + 8)) > 0.001);
 });
 
+test('curved hanger support carries pinned shoulders along the same depth profile', () => {
+  const curved = { ...support, depthBow: 0.012 };
+  assert.equal(hangerDepth(curved, 0), 0);
+  assert.equal(hangerDepth(curved, curved.halfWidth), curved.depthBow);
+  const panels = [panel(false), panel(true)];
+  const original = panels.map((p) => p.geometry.attributes.position.array.slice());
+  settleCloth(panels, curved);
+  let pinned = 0;
+  panels.forEach((p, k) => {
+    const position = p.geometry.attributes.position;
+    assert.ok(position.array.every(Number.isFinite));
+    for (let i = 0; i < position.count; i++) {
+      const x = original[k][i * 3], y = original[k][i * 3 + 1], z = original[k][i * 3 + 2];
+      if (Math.abs(x) >= curved.neckWidth && Math.abs(x) <= curved.halfWidth &&
+          Math.abs(y - hangerHeight(curved, x)) < 0.014) {
+        assert.ok(Math.abs(position.getZ(i) - z - hangerDepth(curved, x)) < 1e-8);
+        pinned++;
+      }
+    }
+    p.geometry.dispose();
+  });
+  assert.ok(pinned > 0);
+});
+
 test('fabric map uses physical metre UVs and respects strength, spacing and sheen', () => {
   const material = new THREE.MeshPhysicalMaterial({ color: '#992233', roughness: 0.5 });
   material.name = 'cotton-jersey';
@@ -57,6 +81,8 @@ test('fabric map uses physical metre UVs and respects strength, spacing and shee
   assert.equal(material.sheen, 0.35);
   assert.ok(material.roughness >= 0.82);
   const first = material.normalMap.image.data.slice();
+  applyFabricDetail(material, { knitSize: 0.8, wrinkles: 0, fabricStrength: 0.7 });
+  assert.deepEqual(material.normalMap.image.data, first, 'macro-fold controls must not alter the knit normal map');
   applyFabricDetail(material, { knitSize: 1.6, wrinkles: 1 });
   assert.notDeepEqual(material.normalMap.image.data, first);
   applyFabricDetail(material, { fabricStrength: 0 });

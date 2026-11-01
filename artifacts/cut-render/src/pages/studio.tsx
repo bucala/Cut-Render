@@ -1,6 +1,6 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useUser } from '@clerk/react';
-import { Vector2 } from 'three';
+import { Vector2, type Object3D } from 'three';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { Link, useParams } from 'wouter';
 import { useQueryClient } from '@tanstack/react-query';
@@ -15,7 +15,7 @@ import {
 import {
   useViewer, generateParametricPlan, buildBoxObject, buildGarmentObject, buildPpfObject, generatePpfPlan, createSampleModel,
   loadModelFile, saveModelFile, importModel, getMaterialsFor, BASE_PAINTS, BOX_STYLES, GARMENT_TEMPLATES, SIZES,
-  exportPlan, ACCEPT_ATTRIBUTE, type Viewer, type ViewerStats, type CutPlan, type ImportedModel, type PpfResult, type ProgressInfo,
+  exportPlan, exportGarmentGlb, ACCEPT_ATTRIBUTE, type Viewer, type ViewerStats, type CutPlan, type ImportedModel, type PpfResult, type ProgressInfo,
   type BoxParams, type GarmentParams, type PpfParams, type PlanExportFormat,
   getPrintPanels, garmentSupportsArtwork, sanitizeArtwork, ensureArtworkFonts, onArtworkAssets, newLayerId,
   type ArtworkLayer, type PanelId, type PrintPanel,
@@ -333,7 +333,7 @@ function Workspace({ project }: { project: Project }) {
 
   const framed = useRef(false);
   const artworkRef = useRef(artwork); artworkRef.current = artwork;
-  const contentRef = useRef<{ userData: Record<string, unknown> } | null>(null);
+  const contentRef = useRef<Object3D | null>(null);
   useEffect(() => {
     if (!viewer) return;
     if (type === 'ppf' && !model) return;
@@ -424,6 +424,16 @@ function Workspace({ project }: { project: Project }) {
       record.mutate({ id: project.id, data: { format: f as ExportFormat, fileName } });
       toast({ title: `Export ${f.toUpperCase()} pripravený`, description: fileName });
     } catch (e) { toast({ title: 'Export zlyhal', description: engineError(e), variant: 'destructive' }); }
+  };
+  const doGarmentExport = async () => {
+    if (!contentRef.current) {
+      toast({ title: 'Model sa pripravuje', description: 'Počkajte, kým sa 3D odev načíta.' });
+      return;
+    }
+    try {
+      const fileName = await exportGarmentGlb(contentRef.current, baseName);
+      toast({ title: 'Export GLB pripravený', description: fileName });
+    } catch (e) { toast({ title: 'Export GLB zlyhal', description: engineError(e), variant: 'destructive' }); }
   };
   const [snapBusy, setSnapBusy] = useState(false);
   const [studioProgress, setStudioProgress] = useState<number | null>(null);
@@ -718,6 +728,14 @@ function Workspace({ project }: { project: Project }) {
 
           {tab === 'export' && (
             <>
+              {type === 'apparel' && <Section title="Model odevu">
+                <p className="text-xs text-muted-foreground mb-3">Stiahnite si samostatný 3D model s geometriou, PBR materiálmi a textúrami.</p>
+                <button onClick={() => void doGarmentExport()} disabled={!plan}
+                  data-testid="button-export-glb" className="w-full border rounded-md p-3 text-left hover:border-primary hover:bg-primary/5 disabled:opacity-40 transition-colors">
+                  <div className="flex items-center justify-between font-mono font-semibold text-sm">GLB · model 3D<Download className="w-3.5 h-3.5 opacity-60" /></div>
+                  <div className="text-[11px] text-muted-foreground">Jeden súbor, pripravený pre Three.js, Blender a ďalšie nástroje</div>
+                </button>
+              </Section>}
               <Section title="Export plánu">
                 <div className="grid grid-cols-2 gap-2">
                   {([['svg', 'Vektor 1:1'], ['dxf', 'CAD, vrstvy'], ['pdf', 'Tlač 1:1'], ['json', 'Dáta plánu']] as const).map(([f, d]) => (
