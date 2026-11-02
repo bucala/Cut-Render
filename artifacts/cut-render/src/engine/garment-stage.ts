@@ -61,7 +61,8 @@ export class GarmentStage {
     this.key = new THREE.RectAreaLight(0xfff7ed, 2.4, 2, 2.8);
     this.fill = new THREE.RectAreaLight(0xe9f1ff, 0.7, 2.4, 3);
     this.rim = new THREE.RectAreaLight(0xffffff, 0, 1.2, 3);
-    this.wall = new THREE.Mesh(new THREE.PlaneGeometry(12, 10),
+    // The lower corner of a wide three-quarter frame sees the wall at a grazing angle.
+    this.wall = new THREE.Mesh(new THREE.PlaneGeometry(120, 100),
       new THREE.MeshPhysicalMaterial({ color: '#d5d1c8', roughness: 0.98, side: THREE.DoubleSide }));
     this.wall.receiveShadow = true;
     const material = new THREE.MeshPhysicalMaterial({ color: '#354531', roughness: 1, side: THREE.DoubleSide });

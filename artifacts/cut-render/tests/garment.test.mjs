@@ -132,3 +132,19 @@ test('garment stage switches light patterns and follows the environment style', 
   assert.ok(stage.shadowKey.castShadow && stage.shadowKey.intensity > 0);
   stage.dispose();
 });
+
+test('studio wall covers the standard front and three-quarter camera frames', () => {
+  const stage = new GarmentStage();
+  stage.fit(1, true);
+  const camera = new THREE.PerspectiveCamera(50, 16 / 9, 0.01, 100);
+  const target = new THREE.Vector3(0, 0.9, 0), ray = new THREE.Raycaster();
+  for (const direction of [new THREE.Vector3(0, 0.12, 1), new THREE.Vector3(0.9, 0.62, 1.25)]) {
+    camera.position.copy(target).addScaledVector(direction.normalize(), 4);
+    camera.lookAt(target); camera.updateMatrixWorld(true);
+    for (const x of [-1, 1]) for (const y of [-1, 1]) {
+      ray.setFromCamera(new THREE.Vector2(x, y), camera);
+      assert.ok(ray.intersectObject(stage.wall).length > 0, `missing wall at frame corner ${x},${y}`);
+    }
+  }
+  stage.dispose();
+});

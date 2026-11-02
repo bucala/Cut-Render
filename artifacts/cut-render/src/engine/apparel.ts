@@ -1,11 +1,11 @@
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { hangerHeight, hangerDepth, settleCloth, type ClothPanel, type ClothSupport } from './cloth-drape';
+import { cornerRounder, lockstitchGeometry, sleeveSideClearance, weldClosedSeams } from './garment-finishing';
 import { applyFabricDetail, applyHeather } from './fabric-detail';
 import type { CutPlan, PlanLabel, PlanPath, PlanPiece, Point } from './types';
 import { bezier, boundsOf, centroid, mirrorX, pieceColor, polygonArea, polylineLength, rotatePoints, translatePoints } from './geom';
 import { createPhysicalMaterial } from './materials';
-import { cavityShade, distToSegs, meshRegion, pointInPolygon, roundProfile, segsOf, smoothstep, type RegionMesh } from './garmentMesh';
+import { cachedMeshRegion, cavityShade, densify, distToSegs, meshRegion, pointInPolygon, roundProfile, segsOf, smoothstep, type RegionMesh } from './garmentMesh';
 import { createInkMaterial, createPanelTexture, type ArtworkLayer, type PanelId, type PanelTexture, type PrintPanel } from './artwork';
 
 export type GarmentId = 'tshirt' | 'hoodie' | 'trousers' | 'skirt' | 'tote';
@@ -938,6 +938,7 @@ interface ShellSpec {
 
 interface ShellLayer {
   mesh: RegionMesh;
+  closedDistance: Float32Array;
   z: Float32Array;
   geo: THREE.BufferGeometry;
 }
@@ -945,11 +946,11 @@ interface ShellLayer {
 type SegList = Float64Array;
 
 /** Unsigned distance of a layer from the mid-plane (mm); with a core form, the outward offset from it. */
-function shellDepth(s: ShellSpec, q: Point, back: boolean): number {
-  const d = distToSegs(q.x, q.y, s.closed);
+function shellDepth(s: ShellSpec, q: Point, back: boolean, d = distToSegs(q.x, q.y, s.closed)): number {
   if (s.core) {
     const fold = s.fold(q, back) * FOLD_K * smoothstep(0, 45, d);
-    return s.creases.length ? fold - 1.5 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 6) ** 2)) : fold;
+    const crease = s.creases.length ? 1.5 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 6) ** 2)) : 0;
+    return fold - crease * smoothstep(0, 12, d);
   }
   let z = s.depth * VOLUME_K * s.profile(q) * roundProfile(d / (s.roll * VOLUME_K ** 0.8));
   if (s.creases.length) z *= 1 - 0.12 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 7) ** 2));
@@ -958,7 +959,9 @@ function shellDepth(s: ShellSpec, q: Point, back: boolean): number {
 
 function shellWorld(s: ShellSpec, q: Point, z: number, back = z < 0): THREE.Vector3 {
   if (!s.core) return V(q.x / 1000, (s.topW - q.y - (s.drop?.(q) ?? 0)) / 1000, z / 1000);
-  return s.core(q, back).addScaledVector(coreNormal(s, q, back), back ? -z : z).multiplyScalar(0.001);
+  const position = s.core(q, back);
+  if (distToSegs(q.x, q.y, s.closed) < 0.01) position.z = 0;
+  return position.addScaledVector(coreNormal(s, q, back), back ? -z : z).multiplyScalar(0.001);
 }
 
 /** Outward normal of the core form at a pattern point (central differences). */
@@ -1031,8 +1034,9 @@ function orientTris(pts: Point[], tris: number[], back: boolean) {
 }
 
 function buildShellLayer(group: THREE.Group, s: ShellSpec, back: boolean, mat: THREE.Material): ShellLayer {
-  const mesh = meshRegion(s.outline, s.constraints, s.step ?? 10);
+  const mesh = cachedMeshRegion(s.outline, s.constraints, s.step ?? 10);
   const n = mesh.pts.length;
+  const closedDistance = Float32Array.from(mesh.pts, (q) => distToSegs(q.x, q.y, s.closed));
   const z = new Float32Array(n);
   const pos = new Float32Array(n * 3);
   const uv = new Float32Array(n * 2);
@@ -1042,14 +1046,18 @@ function buildShellLayer(group: THREE.Group, s: ShellSpec, back: boolean, mat: T
   let coreNormals: THREE.BufferAttribute | null = null;
   if (s.core) {
     const coreGeo = new THREE.BufferGeometry();
-    coreGeo.setAttribute('position', new THREE.Float32BufferAttribute(mesh.pts.flatMap((q) => s.core!(q, back).toArray()), 3));
+    coreGeo.setAttribute('position', new THREE.Float32BufferAttribute(mesh.pts.flatMap((q, i) => {
+      const position = s.core!(q, back);
+      if (closedDistance[i] < 0.01) position.z = 0;
+      return position.toArray();
+    }), 3));
     coreGeo.setIndex(mesh.tris);
     coreGeo.computeVertexNormals();
     coreNormals = coreGeo.getAttribute('normal') as THREE.BufferAttribute;
     pos.set(coreGeo.getAttribute('position').array);
   }
   mesh.pts.forEach((q, i) => {
-    z[i] = sgn * shellDepth(s, q, back);
+    z[i] = sgn * shellDepth(s, q, back, closedDistance[i]);
     if (coreNormals) {
       for (let d = 0; d < 3; d++) pos[i * 3 + d] = (pos[i * 3 + d] + coreNormals.array[i * 3 + d] * z[i] * sgn) / 1000;
     } else {
@@ -1074,7 +1082,7 @@ function buildShellLayer(group: THREE.Group, s: ShellSpec, back: boolean, mat: T
   geo.setIndex(mesh.tris);
   geo.computeVertexNormals();
   addMesh(group, geo, mat);
-  return { mesh, z, geo };
+  return { mesh, closedDistance, z, geo };
 }
 
 /** Mesh a region with given world positions (hood, pocket); outward = -z when `back`. */
@@ -1248,12 +1256,26 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const eX = UP.x - (SP.x + ux * capL);
   const eY = UP.y - (SP.y + uy * capL);
   const ease = (yl: number) => (yl <= ch ? 1 : 1 - smoothstep(ch, sLen, yl));
-  const warp = (xl: number, yl: number): Point => {
+  const sleeveHalf = (yl: number) => {
+    if (yl <= ch) return bw2;
+    if (yl <= sLen) return bw2 + ((hw2 - bw2) * (yl - ch)) / (sLen - ch);
+    return cuffH ? hw2 + (cuffHalf - hw2) * Math.min(1, (yl - sLen) / 10) : hw2;
+  };
+  const warpBase = (xl: number, yl: number): Point => {
     const w = (xl / bw2) * ease(yl);
     const phi = droop * Math.max(0, 1 - xl / hw2) * smoothstep(ch, sLen, yl);
     const lx = nX * xl + dX * yl, ly = nY * xl + dY * yl;
     const c = Math.cos(phi), s = Math.sin(phi);
     return { x: SP.x + lx * c - ly * s + eX * w, y: SP.y + lx * s + ly * c + eY * w };
+  };
+  const warp = (xl: number, yl: number): Point => {
+    const q = warpBase(xl, yl);
+    if (!MARKETING || yl <= ch) return q;
+    const half = sleeveHalf(yl);
+    const shift = sleeveSideClearance(warpBase(half, yl), UP, corner, smoothstep(ch, sLen, yl));
+    // The lower sleeve must not cross the body side in the assembled meshing domain.
+    // Artwork still uses unwarp's original sleeve coordinates.
+    return shift ? { x: q.x + shift * xl / half, y: q.y } : q;
   };
   const unwarp = (q: Point): [number, number] => {
     let xl = (q.x - SP.x) * nX + (q.y - SP.y) * nY;
@@ -1279,7 +1301,8 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const foldR: Point[] = cuffH ? [SP, warp(0, sLen), warp(0, sEnd)] : [SP, warp(0, sEnd)];
   const endHalf = cuffH ? cuffHalf : hw2;
   const endR: Point[] = [];
-  for (let i = 0; i <= 8; i++) endR.push(warp((endHalf * i) / 8, sEnd));
+  // Denser opening samples keep the short sleeve's rounded cross-section smooth in close-ups.
+  for (let i = 0; i <= 32; i++) endR.push(warp((endHalf * i) / 32, sEnd));
   const underR: Point[] = [];
   if (cuffH) underR.push(warp(cuffHalf, sEnd), warp(cuffHalf, sLen + 10));
   for (let i = 0; i <= 18; i++) {
@@ -1327,6 +1350,8 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const inBodyOf = (q: Point, back: boolean) =>
     pointInPolygon(q.x, q.y, back ? bodyPolyB : bodyPolyF) || distToSegs(q.x, q.y, bodyEdge) < 1;
   const marketingFold = (q: Point, back: boolean, inBody: boolean) => {
+    const d = distToSegs(q.x, q.y, armSegs);
+    const k = smoothstep(-25, 25, inBody ? d : -d);
     const phase = back ? 1.7 : 0;
     // A rib hem band (hoodie) stays taut: the ripples fade out before the band seam.
     const rib = hemBand ? 1 - smoothstep(hemY - 90, hemY, q.y) : 1;
@@ -1336,14 +1361,13 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     // Soft vertical flutes that rise from the hem and die out around the waist.
     body += 2.5 * Math.sin((2 * Math.PI * q.x) / (0.15 * W) + q.y * 0.004 + phase * 2) * smoothstep(yBot - 330, yBot, q.y) * rib;
     for (const g of drag) body += 6 * g.amp * ridge(q, g.a, g.b, 22) - 2.6 * g.amp * ridge(q, g.a, g.b, 50);
+    if (k === 1) return body;
     const [xl, yl] = sleeveLocal(q);
     const under = smoothstep(0.25 * hw2, hw2, xl) * (1 - smoothstep(ch, sLen, yl));
     // The sleeve form is already a full tube: only soft underarm gathers and a slight twist.
     const sleeve = 3.5 * Math.sin(yl / 30 + xl / 45 + phase) * under +
       1.8 * Math.sin(yl / 75 - xl / 90 + phase + 0.9) * smoothstep(0, sLen, yl);
     // Blend across the armhole seam so the two fold fields never step against each other.
-    const d = distToSegs(q.x, q.y, armSegs);
-    const k = smoothstep(-25, 25, inBody ? d : -d);
     return body * k + sleeve * (1 - k);
   };
   const drop = (q: Point) => {
@@ -1380,19 +1404,14 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   const shoulderSlope = (SP.y - shoulderR[0].y) / (SP.x - nw);
   // 0 on the shoulder line, where front and back meet over the hanger; 1 once the chest is fully round.
   const fill = (q: Point) => roundProfile((q.y - shoulderR[0].y - Math.max(0, Math.abs(q.x) - nw) * shoulderSlope) / 260);
-  const bodyForm = (q: Point, back: boolean): [number, number, number] => {
+  const bodyForm = (q: Point, back: boolean, draftPoint = q): [number, number, number] => {
     const hw = sideAt(q.y);
     const a = hw / bodyArc.quarter;
-    const k = fill(q);
+    const k = fill(draftPoint);
     const u = q.x / hw;
     if (Math.abs(u) >= 1) return [q.x - Math.sign(q.x) * (hw - a) * k, q.y, 0];
     const th = bodyArc.angle(u);
     return [q.x + (a * Math.sin(th) - q.x) * k, q.y, (back ? -1 : 1) * bodyRatio * a * Math.cos(th) * k];
-  };
-  const sleeveHalf = (yl: number) => {
-    if (yl <= ch) return bw2;
-    if (yl <= sLen) return bw2 + ((hw2 - bw2) * (yl - ch)) / (sLen - ch);
-    return cuffH ? hw2 + (cuffHalf - hw2) * Math.min(1, (yl - sLen) / 10) : hw2;
   };
   const sleeveForm = (q: Point, back: boolean): [number, number, number] => {
     const side = q.x < 0 ? -1 : 1;
@@ -1405,8 +1424,11 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const th = arc.angle;
     // Fold edge f and underarm seam g of this cross-section. The tube hangs from the fold edge, so
     // the sleeve top continues the shoulder line and the narrowing shows on the underarm side.
-    const f = warp(0, yl);
-    const g = warp(half, yl);
+    // A sewn short-sleeve hem has a soft bowed edge, not a rigid planar cut across the tube.
+    const hemRound = !longSleeve ? 4 * Math.sin(Math.PI * THREE.MathUtils.clamp(xl / half, 0, 1)) *
+      smoothstep(sEnd - 18, sEnd, yl) : 0;
+    const f = warp(0, yl + hemRound);
+    const g = warp(half, yl + hemRound);
     const len = Math.hypot(g.x - f.x, g.y - f.y) || 1;
     const centre = ra + 0.15 * (len / 2 - ra);
     const across = (centre + ra * Math.sin(th)) / len;
@@ -1417,6 +1439,8 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     ];
   };
 
+  const shoulderRoundRadius = 36;
+  const roundShoulder = cornerRounder(shoulderR[0], SP, foldR[1], shoulderRoundRadius);
   const spec: ShellSpec = {
     outline: [],
     constraints,
@@ -1430,8 +1454,8 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     roll: 38,
     profile: (q) => 1 - 0.25 * Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad))),
     fold: (q, back) => {
-      const inBody = pointInPolygon(q.x, q.y, back ? bodyPolyB : bodyPolyF);
       if (MARKETING) return marketingFold(q, back, inBodyOf(q, back));
+      const inBody = pointInPolygon(q.x, q.y, back ? bodyPolyB : bodyPolyF);
       if (inBody) {
         const phase = back ? 1.1 : 0;
         const drop = smoothstep(ad + 24, yBot, q.y);
@@ -1456,8 +1480,16 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     // Finer mesh so the narrow catalogue drag folds are resolved instead of faceted.
     step: MARKETING ? 7 : undefined,
     drop,
-    core: MARKETING ? (q, back) => {
-      let c = bodyForm(q, back);
+    core: MARKETING ? (draftPoint, back) => {
+      let q = draftPoint;
+      // Most vertices are nowhere near the shoulder. Do not allocate two points per core
+      // evaluation there (the same core is also sampled repeatedly for seam normals).
+      if (Math.abs(Math.abs(q.x) - SP.x) < 3 * shoulderRoundRadius && Math.abs(q.y - SP.y) < 3 * shoulderRoundRadius) {
+        const local = q.x < 0 ? mirP(q) : q;
+        const rounded = roundShoulder(local);
+        if (rounded !== local) q = q.x < 0 ? mirP(rounded) : rounded;
+      }
+      let c = bodyForm(q, back, draftPoint);
       if (q.y < hemY && Math.abs(q.x) > armX(q.y) && !inBodyOf(q, back)) {
         // The sleeve tube grows out of the body form over the first 7 cm past the armhole seam.
         const w = smoothstep(0, 70, distToSegs(q.x, q.y, armSegs));
@@ -1471,13 +1503,15 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   };
   const surfaces: MeshPrintSurface[] = [];
   const cloth: ClothPanel[] = [];
+  const layers: ShellLayer[] = [];
 
   const makeLayer = (neck: Point[], back: boolean) => {
     const layer = buildShellLayer(group, { ...spec, outline: outlineFor(neck) }, back, mat);
+    layers.push(layer);
     const neckSegs = segsOf([neck]);
     cloth.push({
       geometry: layer.geo,
-      sewn: (i) => distToSegs(layer.mesh.pts[i].x, layer.mesh.pts[i].y, spec.closed) < 0.01,
+      sewn: (i) => layer.closedDistance[i] < 0.01,
       pinned: (i) => distToSegs(layer.mesh.pts[i].x, layer.mesh.pts[i].y, neckSegs) < 8,
     });
     const { pts, tris } = layer.mesh;
@@ -1532,21 +1566,38 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   makeLayer(neckF, false);
   makeLayer(neckB, true);
 
+  if (MARKETING && !longSleeve) for (const edge of [endR, mir(endR)]) {
+    const shades = [
+      ...edge.map((q) => marketingShade(coreNormal(spec, q, false))),
+      ...rev(edge).slice(1, -1).map((q) => marketingShade(coreNormal(spec, q, true))),
+    ];
+    const hem = addSewnDetail(group, openingLoop(spec, edge, edge), mat, false, shades, 0.0008, true);
+    if (hem) hem.name = 'rolled-sleeve-hem';
+  }
   // ---- neckline: rib band (T-shirt) or the rim where the hood is sewn in (hoodie) ----
   addMesh(group, ribBand(openingLoop(spec, neckF, neckB), hoodie ? 0.032 : 0.022, hoodie ? 1.1 : 0.8), mat);
   const depthAt = (q: Point, back: boolean) => shellDepth(spec, q, back);
   const toWorld = (q: Point, z: number, back: boolean) => shellWorld(spec, q, z, back);
   // Twin-needle cover stitch sits ~2 cm inside the hem, never on the silhouette edge.
   const hemInset = bottom.map((q) => ({ x: q.x * 0.95, y: q.y - 20 }));
-  const sleeveInset = endR.map((q) => {
-    const dx = SP.x - q.x, dy = SP.y - q.y, len = Math.hypot(dx, dy) || 1;
-    return { x: q.x + dx / len * 20, y: q.y + dy / len * 20 };
-  });
+  // Follow a constant sleeve row. Pulling toward SP skewed the inset and let stitches leave the cloth.
+  const sleeveInset = endR.map((_, i) => warp(sleeveHalf(sEnd - 20) * i / (endR.length - 1), sEnd - 20));
   for (const back of [false, true]) {
-    const world = (path: Point[]) => path.map((q) => toWorld(q, (back ? -1 : 1) * (depthAt(q, back) + 0.7), back));
-    for (const path of [hemInset, sleeveInset, mir(sleeveInset), back ? neckB : neckF]) addSewnDetail(group, world(path), mat);
+    const sewn = (path: Point[], stitches = true) => {
+      const shades: number[] = [];
+      const world = densify(path, 4, false).map((q) => {
+        if (!spec.core) return toWorld(q, (back ? -1 : 1) * (depthAt(q, back) + 0.5), back);
+        const normal = coreNormal(spec, q, back);
+        shades.push(marketingShade(normal));
+        const position = spec.core(q, back);
+        if (distToSegs(q.x, q.y, spec.closed) < 0.01) position.z = 0;
+        return position.addScaledVector(normal, depthAt(q, back) + 0.5).multiplyScalar(0.001);
+      });
+      addSewnDetail(group, world, mat, stitches, shades);
+    };
+    for (const path of [hemInset, sleeveInset, mir(sleeveInset), back ? neckB : neckF]) sewn(path);
     // Set-in sleeve seams show as a soft ridge only; shoulder seams lie on the silhouette edge.
-    for (const path of [armR, mir(armR)]) addSewnDetail(group, world(path), mat, false);
+    for (const path of [armR, mir(armR)]) sewn(path, false);
   }
 
   if (!hoodie) {
@@ -1639,6 +1690,8 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
       geo.computeBoundingSphere();
     }
   });
+  // Keep separate artwork UVs, but make sewn positions and lighting continuous across both layers.
+  const seamPairs = weldClosedSeams(cloth.map((panel, i) => ({ ...panel, points: layers[i].mesh.pts })));
   // Re-bake fold occlusion after relaxation, using the final cloth positions.
   for (const c of cloth) {
     const geo = c.geometry;
@@ -1651,40 +1704,48 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
       // from the lights, so only a gentle share of that falloff is baked in to keep folds readable.
       const shade = MARKETING
         // (vertex colours are linear: square the perceptual falloff or the display curve flattens it)
-        ? THREE.MathUtils.clamp(0.45 + 0.6 * (-0.3 * normal.getX(i) + 0.2 * normal.getY(i) + 0.85 * Math.abs(nz)), 0.62, 1) ** 2.2
+        ? marketingShade(vertex.fromBufferAttribute(normal, i))
         : Math.max(0.62, 1 - 0.24 * (1 - Math.abs(nz)));
       const ao = Math.min(colors.getX(i), shade);
       colors.setXYZW(i, ao, ao, ao, 1);
     }
     colors.needsUpdate = true;
   }
-  group.userData.cloth = { particles: settled.particles, constraints: settled.constraints };
+  group.userData.cloth = { particles: settled.particles, constraints: settled.constraints, seamPairs };
   if (hanger) addHanger(group, support, finish);
   return surfaces;
 }
 
-/** Raised seam cord plus short lockstitches, merged to keep draw calls bounded. */
-function addSewnDetail(group: THREE.Group, path: THREE.Vector3[], fabric: THREE.Material, stitches = true) {
+function marketingShade(normal: THREE.Vector3): number {
+  return THREE.MathUtils.clamp(0.45 + 0.6 * (-0.3 * normal.x + 0.2 * normal.y + 0.85 * Math.abs(normal.z)), 0.62, 1) ** 2.2;
+}
+
+/** Raised seam cord plus short lockstitches, with the cloth's shading rather than bright edge teeth. */
+function addSewnDetail(group: THREE.Group, path: THREE.Vector3[], fabric: THREE.Material, stitches = true, shades: number[] = [], radius = 0.00045, closed = false) {
   if (path.length < 2) return;
-  const curve = new THREE.CatmullRomCurve3(path, false, 'centripetal');
+  const curve = new THREE.CatmullRomCurve3(path, closed, 'centripetal');
   const length = curve.getLength();
   if (length < 0.001) return;
-  const ridge = new THREE.TubeGeometry(curve, Math.max(8, Math.ceil(length / 0.003)), 0.00045, 5, false);
-  addMesh(group, ridge, fabric).name = 'seam-relief';
-  if (!stitches) return;
-  const parts: THREE.BufferGeometry[] = [];
-  const count = Math.floor(length / 0.0032);
-  for (let i = 0; i < count; i++) {
-    const a = curve.getPointAt(i / count), b = curve.getPointAt((i + 0.6) / count);
-    parts.push(new THREE.TubeGeometry(new THREE.LineCurve3(a, b), 1, 0.00022, 4, false));
-  }
-  if (!parts.length) return;
-  const merged = mergeGeometries(parts);
-  parts.forEach((g) => g.dispose());
-  if (merged) {
-    const color = (fabric as THREE.MeshPhysicalMaterial).color.clone().multiplyScalar(0.93);
-    addMesh(group, merged, new THREE.MeshPhysicalMaterial({ color, roughness: 0.95, sheen: 0.3 })).name = 'lockstitches';
-  }
+  const shade = (u: number) => {
+    if (!shades.length) return 1;
+    const t = curve.getUtoTmapping(u, 0) * (closed ? shades.length : shades.length - 1);
+    const i = Math.min(shades.length - 1, Math.floor(t));
+    const next = closed ? (i + 1) % shades.length : Math.min(i + 1, shades.length - 1);
+    return THREE.MathUtils.lerp(shades[i], shades[next], t - i);
+  };
+  const ridge = new THREE.TubeGeometry(curve, Math.max(8, Math.ceil(length / 0.003)), radius, closed ? 8 : 5, closed);
+  const colors = new Float32Array(ridge.getAttribute('position').count * 3);
+  const uv = ridge.getAttribute('uv');
+  for (let i = 0; i < uv.count; i++) colors.fill(shade(uv.getX(i)), i * 3, i * 3 + 3);
+  ridge.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const seam = addMesh(group, ridge, fabric);
+  seam.name = 'seam-relief';
+  if (!stitches) return seam;
+  const thread = lockstitchGeometry(curve, shade);
+  if (!thread.getAttribute('position').count) { thread.dispose(); return seam; }
+  const color = (fabric as THREE.MeshPhysicalMaterial).color.clone().multiplyScalar(0.88);
+  addMesh(group, thread, new THREE.MeshPhysicalMaterial({ color, vertexColors: true, roughness: 0.95, sheen: 0.12 })).name = 'lockstitches';
+  return seam;
 }
 
 /**

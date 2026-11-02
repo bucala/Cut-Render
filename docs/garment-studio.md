@@ -67,6 +67,16 @@ tvoria skutočné prekážky pred svetlom, nie premietnutý obrázok.
   farby odevu, za odevom ju rozjasňuje mäkký kužeľ svetla a listy sú väčšie a rozmazanejšie.
   Svetlo je kontrastnejšie (menej výplne, silnejší hlavný zdroj).
 
+Prechod ramena do rukáva sa v priestorovom modeli zaobľuje v okolí 36 mm bez zmeny
+súradníc strihu alebo potlače. Obvod otvoru rukáva má jemnejšie vzorkovanie; krátky rukáv
+sa pri okraji mierne prehne a má skutočný zaoblený lem s polomerom 0,8 mm.
+Predná a zadná vrstva majú na uzavretých švoch presne spoločnú polohu aj normálu;
+výstrih a voľné lemy sa nezatvárajú. Stehy sledujú hustejšie vzorkovaný povrch a dostávajú
+rovnaké lokálne zatienenie ako látka, aby na okrajoch nevytvárali svetlé zúbky.
+Spodná hrana rukáva sa pri zostavovaní siete drží mimo boku trupu, aby sa obrys nekrižoval.
+Numericky nulové trojuholníky na rovných hranách sa po triangulácii vynechávajú: pri
+obalení na zakrivený povrch by sa z nich inak stali skutočné výčnelky.
+
 V oboch režimoch je vnútorná strana látky (viditeľná cez výstrih, rukávy a lem) v náhľade
 tmavšia, ako keby ju tienil samotný odev. Path tracer počíta toto zatienenie sám.
 
@@ -78,15 +88,56 @@ Studio Render sa počíta samostatne v rozlíšení 3840 × 2160.
 
 ## Látka a obmedzenia
 
-Predvolená normal mapa úpletu má 512² pixelov na dlaždicu 128 mm.
+Predvolená normal mapa úpletu má 1024² pixelov na dlaždicu 128 mm, melír má 512² pixelov.
 Rozstup úpletu je 0,8 mm, sila reliéfu 0,65 a sheen 0,45.
 Ovládač vrások mení makro-geometriu, nie normal mapu úpletu.
 
 Lokálne zatienenie záhybov je aproximované vertexovými farbami. Nie je to samostatná
 ray-traced AO textúra. PBD simulácia je rýchla aproximácia, nie offline simulácia
-z Marvelous Designer alebo Blenderu. Referenčné súbory `image_*.png` a AVIF neboli
-v tomto pracovnom priestore dostupné, preto zhoda s referenciami ani fotorealistická
-kvalita výsledného renderu zatiaľ neboli vizuálne overené.
+z Marvelous Designer alebo Blenderu. Marketingový tvar je procedurálny model na produktový
+náhľad, nie sken konkrétneho ušitého výrobku ani záruka presnej zhody s referenčnou fotografiou.
+
+## Zostavenie a overovanie
+
+Meranie výkonnosti rozlišuje zostavenie modelu od jeho vykreslenia. Triangulácia používa
+na meranie vzdialeností pôvodné úsečky strihu, nie ich zbytočne delené kópie.
+Pamäťová cache uchováva najviac osem topológií a po štyri pixelové buffery úpletu a melíru.
+Kľúče zahŕňajú obrys, vnútorné švy, hustotu siete a parametre textúr. Každý model dostane
+vlastné body, indexy a GPU textúry, takže zmena farby, orientácia trojuholníkov ani
+uvoľnenie starého modelu nepoškodia ďalší model.
+
+Párové lokálne meranie marketingového trička veľkosti M porovnalo pôvodný commit
+`9bbd518` s touto úpravou v jednom prehliadači, striedavo v oboch poradiach.
+V poslednom meraní bol medián po vynechaní prvého zo šiestich zostavení 482 ms oproti 158 ms,
+teda približne o 67 % menej. Ide o opakované zostavenie samotného modelu, nie o čas
+načítania aplikácie, nahrania textúr do GPU alebo dokončenia path tracingu.
+
+`pnpm --dir artifacts/cut-render test` kontroluje okrem drapérie a GLB aj spojitosť
+zaobleného ramena, presné spojenie švov, otvorené lemy, geometriu stehov a nezávislosť cache.
+Regresia s otočeným obrysom zachytáva aj nulové trojuholníky a vetviace sa hrany. Audit
+skutočného predného a zadného plášťa predvoleného trička po spojení našiel iba štyri
+jednoduché otvory (výstrih, spodný lem, dva rukávy), bez vedľajších dier či neplatných hrán.
+Pri spustenom Vite je na `/tests/browser-garments.html` dostupný testovací vstup používajúci
+skutočný generátor a `Viewer`, bez potreby účtu či API. Umožňuje prepnúť rukávy, mikinu,
+prezentáciu a path tracing. Stav uvádza režim a skutočný počet vzoriek; samotné zapnutie
+prepínača nie je dôkaz, že path tracer úspešne renderuje.
+
+Záverečná lokálna kontrola v Chromium na Windows (WebGL2, RTX 4060) overila zelené
+marketingové tričko a krémovú mikinu v skutočnej slučke produkčného `Viewer`.
+Oba modely dosiahli 256 vzoriek, `converged: true` a `ptFailed: false`, so zapnutou
+štúdiovou stenou. Zachytený bol priamo výstup path tracera, bez následného rasterového
+prekreslenia alebo odšumenia. Počet vzoriek nie je meranie rýchlosti renderovania.
+Vizuálne sa overili aj dlhé rukávy, realistické tričko, nohavice, sukňa a taška;
+kontrola ich geometrických atribútov a indexov nenašla neplatné číselné hodnoty.
+
+Pri veľkom priblížení zostávajú na obryse ramena drobné kroky siete a lem rukáva má
+stále definovanú šikmú hranu. Path tracing pri 256 vzorkách obsahuje viditeľné zrno;
+krémová mikina v ňom vychádza tmavšia než v rasterovom náhľade. Tieto rozdiely sa
+pri overovaní nezakrývali úpravou snímok.
+
+Štúdiová stena pokrýva aj široký trojštvrťový záber, aby v rohu nevznikala čierna plocha.
+Je to fyzická stena za odevom, preto pri kontrole zadnej strany modelu môže zakryť pohľad;
+samotný exportovaný GLB stenu neobsahuje.
 
 Workspace zámerne vylučuje natívne build závislosti Windows v `pnpm-workspace.yaml`.
 Na lokálny build vo Windows treba balíky `@rollup/rollup-win32-x64-msvc`, `@esbuild/win32-x64`,

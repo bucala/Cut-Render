@@ -94,11 +94,12 @@ export function meshRegion(outline: Point[], constraints: Point[][], step: numbe
       const b = ids[(i + 1) % ids.length];
       if (a !== b) edges.push([a, b]);
     }
-    return d;
   };
-  const border = addLine(outline, true);
-  const inner = constraints.map((c) => addLine(c, false));
-  const avoid = segsOf([[...border, border[0]], ...inner]);
+  addLine(outline, true);
+  constraints.forEach((c) => addLine(c, false));
+  // Subdivision does not change distances to a polyline. Keep the short drafting paths for
+  // lattice clearance rather than testing every point against hundreds of redundant segments.
+  const avoid = segsOf([[...outline, outline[0]], ...constraints]);
 
   let minX = Infinity;
   let minY = Infinity;
@@ -120,14 +121,36 @@ export function meshRegion(outline: Point[], constraints: Point[][], step: numbe
   }
 
   const constrained = new Set(edges.map(([a, b]) => (a < b ? a * pts.length + b : b * pts.length + a)));
-  const cells = delaunayFlip(pts, cdt2d(pts, edges, { exterior: true, interior: true, delaunay: false }), constrained);
+  // Numerically collinear border cells have no cloth area, but grow into visible fins when
+  // the flat outline is wrapped onto a curved form. Let refinement repair the initial
+  // connectivity first, then discard the remaining zero-area cells.
+  const significant = ([a, b, c]: number[]) => Math.abs(
+    (pts[b][0] - pts[a][0]) * (pts[c][1] - pts[a][1]) -
+    (pts[b][1] - pts[a][1]) * (pts[c][0] - pts[a][0]),
+  ) > Math.max(1, step * step) * 1e-8;
+  const initial = cdt2d(pts, edges, { exterior: true, interior: true, delaunay: false });
+  const cells = delaunayFlip(pts, initial, constrained);
   const tris: number[] = [];
   for (const [a, b, c] of cells) {
+    if (!significant([a, b, c])) continue;
     const cx = (pts[a][0] + pts[b][0] + pts[c][0]) / 3;
     const cy = (pts[a][1] + pts[b][1] + pts[c][1]) / 3;
     if (pointInPolygon(cx, cy, outline)) tris.push(a, b, c);
   }
   return { pts: pts.map(([x, y]) => ({ x, y })), tris };
+}
+
+const REGION_CACHE = new Map<string, RegionMesh>();
+
+/** Reuse topology across colour/material rebuilds, never sharing mutable points or winding. */
+export function cachedMeshRegion(outline: Point[], constraints: Point[][], step: number): RegionMesh {
+  const key = JSON.stringify([step, outline, constraints]);
+  let mesh = REGION_CACHE.get(key);
+  if (mesh) REGION_CACHE.delete(key);
+  else mesh = meshRegion(outline, constraints, step);
+  REGION_CACHE.set(key, mesh);
+  if (REGION_CACHE.size > 8) REGION_CACHE.delete(REGION_CACHE.keys().next().value!);
+  return { pts: mesh.pts.map((q) => ({ ...q })), tris: [...mesh.tris] };
 }
 
 /**
@@ -210,8 +233,9 @@ export function smoothstep(e0: number, e1: number, x: number): number {
 /** Outline vertex indices of a region mesh (the first `n` points added by meshRegion are the border). */
 export function boundaryFlags(m: RegionMesh): Uint8Array {
   // count edge usage: an edge used by a single triangle is on the boundary
-  const use = new Map<string, number>();
-  const key = (a: number, b: number) => (a < b ? `${a}_${b}` : `${b}_${a}`);
+  const use = new Map<number, number>();
+  const vertexCount = m.pts.length;
+  const key = (a: number, b: number) => (a < b ? a * vertexCount + b : b * vertexCount + a);
   const t = m.tris;
   for (let k = 0; k < t.length; k += 3) {
     for (let e = 0; e < 3; e++) {
@@ -222,7 +246,7 @@ export function boundaryFlags(m: RegionMesh): Uint8Array {
   const flags = new Uint8Array(m.pts.length);
   for (const [kk, n] of use) {
     if (n === 1) {
-      const [a, b] = kk.split('_').map(Number);
+      const a = Math.floor(kk / vertexCount), b = kk % vertexCount;
       flags[a] = 1;
       flags[b] = 1;
     }
