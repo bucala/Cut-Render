@@ -53,8 +53,12 @@ tvoria skutočné prekážky pred svetlom, nie premietnutý obrázok.
 - **Realistické**: odev visí pod vlastnou váhou, stena má farbu prostredia.
 - **Marketingové**: odev má plný objem ako na fotke s neviditeľnou figurínou
   (tričko 4,2×, mikina 3,6×, sukňa 3,2×, taška 2,6×, nohavice 2,4× hlbšie vrstvy),
-  záhyby sú pokojnejšie (30 %) a látka sa gravitačne nesimuluje, takže tvar ostane hladký.
-  Rukávy odstávajú šikmo nadol (krátke 32°, dlhé 50°). Stena má stredný, menej sýty odtieň
+  látka sa gravitačne nesimuluje a záhyby majú vlastný katalógový vzor: ťahové záhyby
+  od podpazušia k hrudi, mäkké vlny a zvislé riasenie pri leme (lem je zvlnený aj v obryse,
+  rebrový lem mikiny ostáva napnutý) a záhyby v podpazuší rukávov. Telo má oválny prierez,
+  rukávy sú o štvrtinu tenšie a odstávajú šikmo nadol (krátke 44°, dlhé 56°).
+  Do vertexových farieb sa zapečie tieň od hlavného svetla zľava zhora, takže boky a záhyby
+  ostanú čitateľné aj v mäkkom náhľade. Stena má stredný, menej sýty odtieň
   farby odevu, za odevom ju rozjasňuje mäkký kužeľ svetla a listy sú väčšie a rozmazanejšie.
   Svetlo je kontrastnejšie (menej výplne, silnejší hlavný zdroj).
 

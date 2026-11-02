@@ -179,8 +179,8 @@ export class GarmentStage {
     const wall = this.wall.material as THREE.MeshPhysicalMaterial;
     wall.color.set(marketing && this.garmentColor ? marketingBackdrop(this.garmentColor) : new THREE.Color(s.wall));
     // Catalogue light: a stronger, more directional key and less fill for deeper modelling.
-    const keyGain = marketing ? 1.15 : 1;
-    const fillGain = marketing ? 0.55 : 1;
+    const keyGain = marketing ? 1.3 : 1;
+    const fillGain = marketing ? 0.4 : 1;
     this.key.color.set(s.key.color);
     this.key.intensity = s.key.intensity * 0.7 * keyGain;
     this.key.position.set(...s.key.position);
