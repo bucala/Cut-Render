@@ -14,7 +14,8 @@ Rozmery modelu sú v metroch.
   pliec a pri koncoch majú zárezy na ramienka. V strede sa ramienko dvíha do zaobleného
   vrcholu, ktorý vidno cez výstrih. Medzi koncami ramien je brezová tyčka na nohavice.
   Biele ramienko má brezový stred.
-  Chrómový hák má drôt 5 mm, rovnú stopku a zahnutý oblúk s guľôčkou na konci.
+  Chrómový hák má drôt 5 mm. Stopka sa mierne nakloní, prejde do otvoreného oblúka
+  s polomerom 26 mm a koniec sa jemne vyhne von. Celá dráha je hladká, bez zlomov.
 - Výstrih je pri simulácii pripnutý v nakreslenom tvare, pretože ho drží rebrový lem.
   Plecia na ramienku dostanú oproti strihu ďalší sklon približne 17°.
 - Každý voľný bod látky má tether k najbližšiemu uchytenému bodu, takže sa odev pod
@@ -52,8 +53,12 @@ tvoria skutočné prekážky pred svetlom, nie premietnutý obrázok.
 - **Realistické**: odev visí pod vlastnou váhou, stena má farbu prostredia.
 - **Marketingové**: odev má plný objem ako na fotke s neviditeľnou figurínou
   (tričko 4,2×, mikina 3,6×, sukňa 3,2×, taška 2,6×, nohavice 2,4× hlbšie vrstvy),
-  záhyby sú pokojnejšie (45 %), stena má svetlý, menej sýty odtieň farby odevu
-  a svetlo je kontrastnejšie (menej výplne, silnejší hlavný zdroj).
+  záhyby sú pokojnejšie (30 %) a látka sa gravitačne nesimuluje, takže tvar ostane hladký.
+  Rukávy odstávajú šikmo nadol (krátke 32°, dlhé 50°). Stena má stredný, menej sýty odtieň
+  farby odevu, za odevom ju rozjasňuje mäkký kužeľ svetla a listy sú väčšie a rozmazanejšie.
+  Svetlo je kontrastnejšie (menej výplne, silnejší hlavný zdroj).
+
+Text v aplikácii sa ťahaním myši neoznačuje. Označiť sa dá iba obsah polí a editovateľný text.
 
 Viewer používa procedurálne HDR prostredie, predvolene `studio`, expozíciu 1,
 lineárny výpočet osvetlenia a sRGB výstup. Path tracer má 6 odrazov a výstup

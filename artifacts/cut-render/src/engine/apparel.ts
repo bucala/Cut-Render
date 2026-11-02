@@ -877,6 +877,8 @@ export interface GarmentObjectOptions {
 let FOLD_K = 1;
 /** Layer depth multiplier for the garment currently being built; marketing shots carry more volume. */
 let VOLUME_K = 1;
+/** Catalogue build: sleeves held out, no gravity settle, so the garment keeps its full, smooth shape. */
+let MARKETING = false;
 
 /** Print surface on a pattern-built mesh: every vertex carries its panel coordinates (mm). */
 interface MeshPrintSurface {
@@ -1151,7 +1153,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     wy = -wy;
   }
   // on a hanger the sleeves hang lower than in the flat lay: pivot about the shoulder point
-  const poseAngle = (longSleeve ? 58 : 40) * (Math.PI / 180);
+  const poseAngle = (MARKETING ? (longSleeve ? 50 : 32) : (longSleeve ? 58 : 40)) * (Math.PI / 180);
   // The fold edge hangs lower than the underarm seam, which stays clear of the body side seam.
   // Capped so the fold edge never moves more than a third of the sleeve width toward the seam.
   const droop = Math.min(14 * (Math.PI / 180), Math.asin(Math.min(1, (0.35 * hw2) / sLen)));
@@ -1421,11 +1423,11 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
 
   const slope = (SP.y - shoulderR[0].y) / (SP.x - nw) + SHOULDER_DROP;
   const support = { top: spec.topW / 1000, neckWidth: nw / 1000, halfWidth: Math.min(SP.x / 1000 - 0.05, 0.205), slope };
-  const settled = settleCloth(cloth, support);
+  const settled = MARKETING ? { displacement: () => new THREE.Vector3(), particles: 0, constraints: 0 } : settleCloth(cloth, support);
   const shells = new Set(cloth.map((c) => c.geometry));
   const vertex = new THREE.Vector3();
   group.updateMatrixWorld(true);
-  group.traverse((o) => {
+  if (!MARKETING) group.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if (!mesh.isMesh) return;
     const geo = mesh.geometry;
@@ -1568,21 +1570,38 @@ function addHanger(group: THREE.Group, support: ClothSupport, finish: 'white' | 
   barMesh.position.set(0, barY, 0);
   barMesh.name = 'hanger-bar';
 
-  // --- chrome hook: 5 mm wire, straight stem, "?" curl closing back toward the stem, ball tip ---
+  // --- chrome hook, as on shop hangers: 5 mm wire, a stem leaning slightly to one side, then an
+  // open arc over the top that ends pointing down on the far side. It never closes into a ring.
   const wire = 0.0026;
-  const R = 0.024;
-  const stemBase = topEdge(0) - 0.006;
-  const stemTop = topEdge(0) + 0.05;
+  // Traced as a pen path (length, turn) so every joint is tangent-continuous; joining a straight
+  // stem to a separate arc leaves visible kinks in the chrome highlights.
+  const deg = Math.PI / 180;
+  const path: [length: number, turn: number][] = [
+    [0.014, 0],
+    [0.016, -10 * deg], // slight lean away from the open side
+    [0.024, 0],
+    [0.026 * 200 * deg, 200 * deg], // R 26 mm arc over the top, down the far side
+    [0.006 * 40 * deg, -40 * deg], // the cut end flicks outward instead of curling back
+  ];
   const pts: THREE.Vector3[] = [];
-  for (let i = 0; i <= 10; i++) pts.push(V(0, stemBase + ((stemTop - stemBase) * i) / 10, 0));
-  const endA = Math.PI * 1.42;
-  for (let i = 1; i <= 56; i++) {
-    const a = (endA * i) / 56;
-    pts.push(V(-R + R * Math.cos(a), stemTop + R * Math.sin(a), 0));
+  let x = 0;
+  let y = topEdge(0) - 0.006;
+  let heading = 90 * deg;
+  pts.push(V(x, y, 0));
+  for (const [length, turn] of path) {
+    const steps = Math.max(2, Math.ceil(length / 0.0015));
+    for (let i = 0; i < steps; i++) {
+      const ds = length / steps;
+      const mid = heading + turn / steps / 2;
+      x += ds * Math.cos(mid);
+      y += ds * Math.sin(mid);
+      heading += turn / steps;
+      pts.push(V(x, y, 0));
+    }
   }
   const hookCurve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-  addMesh(group, new THREE.TubeGeometry(hookCurve, 200, wire, 24), chrome).name = 'chrome-hook';
-  addMesh(group, new THREE.SphereGeometry(wire * 1.25, 20, 14), chrome).position.copy(pts[pts.length - 1]);
+  addMesh(group, new THREE.TubeGeometry(hookCurve, 240, wire, 24), chrome).name = 'chrome-hook';
+  addMesh(group, new THREE.SphereGeometry(wire, 20, 14), chrome).position.copy(pts[pts.length - 1]);
   const ferrule = new THREE.CylinderGeometry(0.0042, 0.0052, 0.007, 20);
   addMesh(group, ferrule, chrome).position.set(0, topEdge(0) + 0.003, 0);
 }
@@ -1774,7 +1793,8 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
   const group = new THREE.Group();
   outer.add(group);
   const marketing = options.presentation === 'marketing';
-  FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1)) * (marketing ? 0.45 : 1);
+  FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1)) * (marketing ? 0.3 : 1);
+  MARKETING = marketing;
   // Ghost-mannequin fullness: a body is about a third as deep as it is wide; legs, skirts and bags less.
   const volume: Partial<Record<GarmentId, number>> = { tshirt: 4.2, hoodie: 3.6, trousers: 2.4, skirt: 3.2, tote: 2.6 };
   VOLUME_K = marketing ? volume[p.garment] ?? 3 : 1;
@@ -1797,6 +1817,7 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
   }
   FOLD_K = 1;
   VOLUME_K = 1;
+  MARKETING = false;
 
   // printed artwork: one transparent overlay per panel, redrawn in place when layers change
   const prints: { tex: PanelTexture; meshes: THREE.Mesh[] }[] = [];

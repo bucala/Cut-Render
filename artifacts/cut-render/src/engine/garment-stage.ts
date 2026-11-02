@@ -25,8 +25,9 @@ export const DEFAULT_STAGE_STYLE: StageStyle = {
 export function marketingBackdrop(garment: THREE.Color): THREE.Color {
   const hsl = { h: 0, s: 0, l: 0 };
   garment.getHSL(hsl);
-  const s = Math.min(hsl.s * 0.5, 0.32);
-  const l = THREE.MathUtils.clamp(0.5 + hsl.l * 0.32, 0.5, 0.82);
+  // A mid-tone base; the halo light behind the garment brightens it into the usual centre glow.
+  const s = Math.min(hsl.s * 0.45, 0.28);
+  const l = THREE.MathUtils.clamp(0.4 + hsl.l * 0.3, 0.4, 0.7);
   return new THREE.Color().setHSL(hsl.h, s, l);
 }
 
@@ -46,6 +47,8 @@ export class GarmentStage {
   readonly shaftLight = new THREE.SpotLight(0xfff3e0, 0);
   /** Softboxes cast no raster shadows; this spot at the key carries the soft cast shadows. */
   readonly shadowKey = new THREE.SpotLight(0xffffff, 0);
+  /** Soft pool of light on the wall; it sits behind the garment and points away from it, so only the wall catches it. */
+  readonly halo = new THREE.SpotLight(0xffffff, 0);
   private gobo: GoboPattern = 'off';
   private style: StageStyle = DEFAULT_STAGE_STYLE;
   private presentation: GarmentPresentation = 'realistic';
@@ -95,7 +98,7 @@ export class GarmentStage {
     this.panes.castShadow = true;
     this.panes.name = 'window-panes';
     this.root.add(this.wall, this.key, this.fill, this.rim, this.leaves, this.panes,
-      this.goboLight, this.goboLight.target, this.shaftLight, this.shaftLight.target, this.shadowKey, this.shadowKey.target);
+      this.goboLight, this.goboLight.target, this.shaftLight, this.shaftLight.target, this.shadowKey, this.shadowKey.target, this.halo, this.halo.target);
     for (const light of [this.goboLight, this.shaftLight]) {
       light.angle = 0.42;
       light.penumbra = 0.7;
@@ -121,6 +124,10 @@ export class GarmentStage {
     this.shadowKey.shadow.radius = 8;
     this.shadowKey.shadow.bias = -0.0002;
     this.shadowKey.shadow.normalBias = 0.01;
+    this.halo.angle = 1;
+    this.halo.penumbra = 1;
+    this.halo.decay = 0;
+    this.halo.castShadow = false;
     this.root.visible = false;
   }
 
@@ -194,9 +201,22 @@ export class GarmentStage {
     this.rim.intensity = (s.rim?.intensity ?? 0) * (marketing ? 1.3 : 1);
     this.rim.position.set(1.6, 2.2, -0.9);
     this.rim.lookAt(0, 1, 0);
+    this.halo.color.copy(marketing && this.garmentColor ? marketingBackdrop(this.garmentColor).lerp(new THREE.Color(1, 1, 1), 0.6) : new THREE.Color(1, 1, 1));
+    this.halo.intensity = marketing ? 1.4 : 0;
+    this.halo.position.set(0.15, 1.2, -0.55);
+    this.halo.target.position.set(0.25, 1.35, -1.2);
+    // Catalogue leaves are large and far out of focus; a coarse shadow map blurs them in the preview.
+    const blur = marketing ? 256 : 768;
+    if (this.goboLight.shadow.mapSize.x !== blur) {
+      this.goboLight.shadow.mapSize.set(blur, blur);
+      this.goboLight.shadow.map?.dispose();
+      this.goboLight.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+    }
+    (this.goboLight as THREE.SpotLight & { radius?: number }).radius = marketing ? 0.25 : 0.1;
+    this.leaves.scale.setScalar(marketing ? 2 : 1.45);
+    this.goboLight.intensity = this.gobo === 'leaves' ? (marketing ? 1.1 : 0.9) : 0;
     this.leaves.visible = this.gobo === 'leaves';
     this.goboLight.visible = this.gobo === 'leaves';
-    this.goboLight.intensity = this.gobo === 'leaves' ? 0.9 : 0;
     const shafts = this.gobo === 'window' ? (s.shafts ?? { color: '#fff3e0', intensity: 1.1 }) : s.shafts;
     this.panes.visible = !!shafts;
     this.shaftLight.visible = !!shafts;

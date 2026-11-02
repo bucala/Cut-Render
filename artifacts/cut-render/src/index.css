@@ -322,6 +322,23 @@
   body {
     @apply font-sans antialiased bg-background text-foreground;
   }
+
+  /* Brand-tinted selection that keeps the text colour readable on light and dark surfaces. */
+  ::selection {
+    background-color: hsl(var(--primary) / 0.24);
+    color: inherit;
+  }
+
+  /* The app is clicked and dragged like a desktop tool: stray drags and double clicks must not paint
+     the whole page blue. Text fields, editable content and anything marked select-text stay selectable. */
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  input, textarea, select, [contenteditable='true'], pre, code {
+    -webkit-user-select: text;
+    user-select: text;
+  }
 }
 
 /**
