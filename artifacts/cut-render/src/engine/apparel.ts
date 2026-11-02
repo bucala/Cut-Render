@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { hangerHeight, hangerDepth, settleCloth, type ClothPanel, type ClothSupport } from './cloth-drape';
-import { applyFabricDetail } from './fabric-detail';
+import { applyFabricDetail, applyHeather } from './fabric-detail';
 import type { CutPlan, PlanLabel, PlanPath, PlanPiece, Point } from './types';
 import { bezier, boundsOf, centroid, mirrorX, pieceColor, polygonArea, polylineLength, rotatePoints, translatePoints } from './geom';
 import { createPhysicalMaterial } from './materials';
@@ -926,6 +926,11 @@ interface ShellSpec {
   fold: (q: Point, back: boolean) => number;
   /** world y (mm) of pattern y = 0 */
   topW: number;
+  /**
+   * Filled-out form (world mm) the two layers are wrapped onto. When set, depth, roll and profile
+   * are unused: the form carries the volume and the layers only add folds along its normal.
+   */
+  core?: (q: Point, back: boolean) => THREE.Vector3;
   /** extra downward offset (mm) that lays the shoulders onto the hanger slope */
   drop?: (q: Point) => number;
   step?: number;
@@ -939,16 +944,74 @@ interface ShellLayer {
 
 type SegList = Float64Array;
 
-/** unsigned distance of a layer from the mid-plane (mm) */
+/** Unsigned distance of a layer from the mid-plane (mm); with a core form, the outward offset from it. */
 function shellDepth(s: ShellSpec, q: Point, back: boolean): number {
   const d = distToSegs(q.x, q.y, s.closed);
+  if (s.core) {
+    const fold = s.fold(q, back) * FOLD_K * smoothstep(0, 45, d);
+    return s.creases.length ? fold - 1.5 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 6) ** 2)) : fold;
+  }
   let z = s.depth * VOLUME_K * s.profile(q) * roundProfile(d / (s.roll * VOLUME_K ** 0.8));
   if (s.creases.length) z *= 1 - 0.12 * Math.exp(-((distToSegs(q.x, q.y, s.creases) / 7) ** 2));
   return z + s.fold(q, back) * FOLD_K * smoothstep(0, 45, d);
 }
 
-function shellWorld(s: ShellSpec, q: Point, z: number): THREE.Vector3 {
-  return V(q.x / 1000, (s.topW - q.y - (s.drop?.(q) ?? 0)) / 1000, z / 1000);
+function shellWorld(s: ShellSpec, q: Point, z: number, back = z < 0): THREE.Vector3 {
+  if (!s.core) return V(q.x / 1000, (s.topW - q.y - (s.drop?.(q) ?? 0)) / 1000, z / 1000);
+  return s.core(q, back).addScaledVector(coreNormal(s, q, back), back ? -z : z).multiplyScalar(0.001);
+}
+
+/** Outward normal of the core form at a pattern point (central differences). */
+function coreNormal(s: ShellSpec, q: Point, back: boolean): THREE.Vector3 {
+  const core = s.core!;
+  const h = 0.8;
+  const tx = core({ x: q.x + h, y: q.y }, back).sub(core({ x: q.x - h, y: q.y }, back));
+  const ty = core({ x: q.x, y: q.y + h }, back).sub(core({ x: q.x, y: q.y - h }, back));
+  // pattern y points down, so x-tangent cross y-tangent faces into the garment on the front layer
+  return tx.cross(ty).multiplyScalar(back ? 1 : -1).normalize();
+}
+
+const ARC_TABLES = new Map<number, { quarter: number; angle: (f: number) => number }>();
+
+/**
+ * Arc-length parametrisation of the half ellipse x = sin(t), z = r cos(t): `angle(f)` turns a
+ * signed fraction of the half arc (-1 side, 0 middle, 1 other side) into t. `quarter` is the
+ * quarter arc length of the unit ellipse, so a half arc of length L needs semi-axis L / (2 quarter).
+ */
+function ellipseArc(r: number) {
+  const cached = ARC_TABLES.get(r);
+  if (cached) return cached;
+  const n = 128;
+  const acc = new Float64Array(n + 1);
+  for (let i = 1; i <= n; i++) {
+    const t = ((i - 0.5) / n) * (Math.PI / 2);
+    acc[i] = acc[i - 1] + Math.hypot(Math.cos(t), r * Math.sin(t)) * (Math.PI / 2 / n);
+  }
+  const quarter = acc[n];
+  const angle = (f: number) => {
+    const s = Math.min(1, Math.abs(f)) * quarter;
+    let lo = 0;
+    let hi = n;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (acc[mid] < s) lo = mid;
+      else hi = mid;
+    }
+    return Math.sign(f) * ((lo + (s - acc[lo]) / (acc[hi] - acc[lo])) / n) * (Math.PI / 2);
+  };
+  const table = { quarter, angle };
+  ARC_TABLES.set(r, table);
+  return table;
+}
+
+/** `ellipseArc` for any ratio, interpolated between tables 0.05 apart. */
+function ellipseArcAt(r: number, f: number): { quarter: number; angle: number } {
+  const k = Math.min(1, Math.max(0, r)) * 20;
+  const i = Math.min(19, Math.floor(k));
+  const a = ellipseArc(i / 20);
+  const b = ellipseArc((i + 1) / 20);
+  const t = k - i;
+  return { quarter: a.quarter + (b.quarter - a.quarter) * t, angle: a.angle(f) + (b.angle(f) - a.angle(f)) * t };
 }
 
 /** Orient triangles so the layer faces outward (+z front, -z back). */
@@ -974,16 +1037,30 @@ function buildShellLayer(group: THREE.Group, s: ShellSpec, back: boolean, mat: T
   const pos = new Float32Array(n * 3);
   const uv = new Float32Array(n * 2);
   const sgn = back ? -1 : 1;
+  orientTris(mesh.pts, mesh.tris, back);
+  // With a core form, offsets follow the normals of the meshed form (cheaper than per-vertex differences).
+  let coreNormals: THREE.BufferAttribute | null = null;
+  if (s.core) {
+    const coreGeo = new THREE.BufferGeometry();
+    coreGeo.setAttribute('position', new THREE.Float32BufferAttribute(mesh.pts.flatMap((q) => s.core!(q, back).toArray()), 3));
+    coreGeo.setIndex(mesh.tris);
+    coreGeo.computeVertexNormals();
+    coreNormals = coreGeo.getAttribute('normal') as THREE.BufferAttribute;
+    pos.set(coreGeo.getAttribute('position').array);
+  }
   mesh.pts.forEach((q, i) => {
     z[i] = sgn * shellDepth(s, q, back);
-    const v = shellWorld(s, q, z[i]);
-    pos[i * 3] = v.x;
-    pos[i * 3 + 1] = v.y;
-    pos[i * 3 + 2] = v.z;
+    if (coreNormals) {
+      for (let d = 0; d < 3; d++) pos[i * 3 + d] = (pos[i * 3 + d] + coreNormals.array[i * 3 + d] * z[i] * sgn) / 1000;
+    } else {
+      const v = shellWorld(s, q, z[i], back);
+      pos[i * 3] = v.x;
+      pos[i * 3 + 1] = v.y;
+      pos[i * 3 + 2] = v.z;
+    }
     uv[i * 2] = q.x / 1000;
     uv[i * 2 + 1] = -q.y / 1000;
   });
-  orientTris(mesh.pts, mesh.tris, back);
   const shade = cavityShade(mesh, z, sgn, 0.55);
   const col = new Float32Array(n * 4);
   for (let i = 0; i < n; i++) {
@@ -1074,8 +1151,8 @@ function ribBand(loop: THREE.Vector3[], height: number, tilt: number): THREE.Buf
 /** Closed opening loop: front edge on the front layer, back edge on the back layer. */
 function openingLoop(s: ShellSpec, frontEdge: Point[], backEdge: Point[]): THREE.Vector3[] {
   const loop: THREE.Vector3[] = [];
-  for (const q of frontEdge) loop.push(shellWorld(s, q, shellDepth(s, q, false)));
-  for (const q of rev(backEdge).slice(1, -1)) loop.push(shellWorld(s, q, -shellDepth(s, q, true)));
+  for (const q of frontEdge) loop.push(shellWorld(s, q, shellDepth(s, q, false), false));
+  for (const q of rev(backEdge).slice(1, -1)) loop.push(shellWorld(s, q, -shellDepth(s, q, true), true));
   return loop;
 }
 
@@ -1153,10 +1230,11 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     wy = -wy;
   }
   // on a hanger the sleeves hang lower than in the flat lay: pivot about the shoulder point
-  const poseAngle = (MARKETING ? (longSleeve ? 56 : 44) : (longSleeve ? 58 : 40)) * (Math.PI / 180);
+  const poseAngle = (MARKETING ? (longSleeve ? 62 : 50) : (longSleeve ? 58 : 40)) * (Math.PI / 180);
   // The fold edge hangs lower than the underarm seam, which stays clear of the body side seam.
   // Capped so the fold edge never moves more than a third of the sleeve width toward the seam.
-  const droop = Math.min(14 * (Math.PI / 180), Math.asin(Math.min(1, (0.35 * hw2) / sLen)));
+  // (Not on the catalogue form: there the sleeve is a round tube and a skewed hem would crumple it.)
+  const droop = MARKETING ? 0 : Math.min(14 * (Math.PI / 180), Math.asin(Math.min(1, (0.35 * hw2) / sLen)));
   const natural = Math.atan2(sinL * uy + cosL * wy, sinL * ux + cosL * wx);
   const rot = Math.max(0, poseAngle - natural);
   const rotate = (x: number, y: number): [number, number] => [x * Math.cos(rot) - y * Math.sin(rot), x * Math.sin(rot) + y * Math.cos(rot)];
@@ -1253,20 +1331,92 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     // A rib hem band (hoodie) stays taut: the ripples fade out before the band seam.
     const rib = hemBand ? 1 - smoothstep(hemY - 90, hemY, q.y) : 1;
     const hem = smoothstep(yBot - 240, yBot, q.y) * rib;
-    let body = 7 * Math.sin((2 * Math.PI * q.x) / (0.72 * W) + q.y * 0.0018 + phase) * smoothstep(ad - 120, yBot, q.y);
-    body += 9 * Math.sin((2 * Math.PI * q.x) / (0.24 * W) + phase + 0.6) * hem;
+    let body = 4 * Math.sin((2 * Math.PI * q.x) / (0.72 * W) + q.y * 0.0018 + phase) * smoothstep(ad - 120, yBot, q.y);
+    body += 6 * Math.sin((2 * Math.PI * q.x) / (0.24 * W) + phase + 0.6) * hem;
     // Soft vertical flutes that rise from the hem and die out around the waist.
-    body += 4 * Math.sin((2 * Math.PI * q.x) / (0.15 * W) + q.y * 0.004 + phase * 2) * smoothstep(yBot - 330, yBot, q.y) * rib;
-    for (const g of drag) body += 4.5 * g.amp * ridge(q, g.a, g.b, 20) - 2 * g.amp * ridge(q, g.a, g.b, 46);
+    body += 2.5 * Math.sin((2 * Math.PI * q.x) / (0.15 * W) + q.y * 0.004 + phase * 2) * smoothstep(yBot - 330, yBot, q.y) * rib;
+    for (const g of drag) body += 6 * g.amp * ridge(q, g.a, g.b, 22) - 2.6 * g.amp * ridge(q, g.a, g.b, 50);
     const [xl, yl] = sleeveLocal(q);
     const under = smoothstep(0.25 * hw2, hw2, xl) * (1 - smoothstep(ch, sLen, yl));
-    const sleeve = 8 * Math.sin(yl / 30 + xl / 45 + phase) * under +
-      3.5 * Math.sin(yl / 75 - xl / 90 + phase + 0.9) * smoothstep(0, sLen, yl);
+    // The sleeve form is already a full tube: only soft underarm gathers and a slight twist.
+    const sleeve = 3.5 * Math.sin(yl / 30 + xl / 45 + phase) * under +
+      1.8 * Math.sin(yl / 75 - xl / 90 + phase + 0.9) * smoothstep(0, sLen, yl);
     // Blend across the armhole seam so the two fold fields never step against each other.
     const d = distToSegs(q.x, q.y, armSegs);
     const k = smoothstep(-25, 25, inBody ? d : -d);
     return body * k + sleeve * (1 - k);
   };
+  const drop = (q: Point) => {
+    // The marketing hem falls in soft waves instead of a ruler-straight edge.
+    const wave = MARKETING && !hemBand ? 3.2 * Math.sin((2 * Math.PI * q.x) / (0.24 * W) + 0.6) * smoothstep(yBot - 120, yBot, q.y) : 0;
+    const d = SHOULDER_DROP * Math.min(Math.max(Math.abs(q.x) - nw, 0), SP.x - nw);
+    if (!d) return wave;
+    // Sleeves hang from the armhole: below the underarm they take its drop instead of fading out,
+    // which keeps the offset continuous across the sleeve seam.
+    const sleeve = q.y < hemY && !pointInPolygon(q.x, q.y, bodyPolyB);
+    return wave + d * (1 - smoothstep(SP.y, ad + 160, sleeve ? Math.min(q.y, ad) : q.y));
+  };
+
+  // ---- catalogue form: the shell wrapped round an oval body and two sleeve tubes ----
+  // Each row keeps its cut width as arc length, so the silhouette narrows as the garment fills out
+  // instead of inflating into a pillow as wide as the flat pattern.
+  const bodyRatio = hoodie ? 0.55 : 0.5;
+  const bodyArc = ellipseArc(bodyRatio);
+  const sideAt = (y: number) => {
+    if (y <= ad) return UP.x;
+    if (y <= hemY) return UP.x + ((corner.x - UP.x) * (y - ad)) / (hemY - ad);
+    return hemBand ? corner.x + (bandHalf - corner.x) * Math.min(1, (y - hemY) / hemBand) : corner.x;
+  };
+  // Outer edge of the body at a height: armhole above the underarm, side seam below. Beyond it lies
+  // the sleeve (the neck opening is not: hood and collar points there stay on the body form).
+  const armX = (y: number) => {
+    if (y <= armR[0].y) return armR[0].x;
+    for (let i = 1; i < armR.length; i++) {
+      const a = armR[i - 1], b = armR[i];
+      if (y <= b.y) return b.y > a.y ? a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y) : b.x;
+    }
+    return sideAt(y);
+  };
+  const shoulderSlope = (SP.y - shoulderR[0].y) / (SP.x - nw);
+  // 0 on the shoulder line, where front and back meet over the hanger; 1 once the chest is fully round.
+  const fill = (q: Point) => roundProfile((q.y - shoulderR[0].y - Math.max(0, Math.abs(q.x) - nw) * shoulderSlope) / 260);
+  const bodyForm = (q: Point, back: boolean): [number, number, number] => {
+    const hw = sideAt(q.y);
+    const a = hw / bodyArc.quarter;
+    const k = fill(q);
+    const u = q.x / hw;
+    if (Math.abs(u) >= 1) return [q.x - Math.sign(q.x) * (hw - a) * k, q.y, 0];
+    const th = bodyArc.angle(u);
+    return [q.x + (a * Math.sin(th) - q.x) * k, q.y, (back ? -1 : 1) * bodyRatio * a * Math.cos(th) * k];
+  };
+  const sleeveHalf = (yl: number) => {
+    if (yl <= ch) return bw2;
+    if (yl <= sLen) return bw2 + ((hw2 - bw2) * (yl - ch)) / (sLen - ch);
+    return cuffH ? hw2 + (cuffHalf - hw2) * Math.min(1, (yl - sLen) / 10) : hw2;
+  };
+  const sleeveForm = (q: Point, back: boolean): [number, number, number] => {
+    const side = q.x < 0 ? -1 : 1;
+    const [xl, yl] = sleeveLocal(q);
+    const half = sleeveHalf(yl);
+    // Flat where it is sewn to the body side (as deep as the armhole there), rounder toward the hem.
+    const ratio = 0.45 + 0.3 * smoothstep(ch * 0.5, ch + 150, yl);
+    const arc = ellipseArcAt(ratio, (2 * xl) / half - 1);
+    const ra = half / (2 * arc.quarter);
+    const th = arc.angle;
+    // Fold edge f and underarm seam g of this cross-section. The tube hangs from the fold edge, so
+    // the sleeve top continues the shoulder line and the narrowing shows on the underarm side.
+    const f = warp(0, yl);
+    const g = warp(half, yl);
+    const len = Math.hypot(g.x - f.x, g.y - f.y) || 1;
+    const centre = ra + 0.15 * (len / 2 - ra);
+    const across = (centre + ra * Math.sin(th)) / len;
+    return [
+      side * (f.x + (g.x - f.x) * across),
+      f.y + (g.y - f.y) * across,
+      (back ? -1 : 1) * ratio * ra * Math.cos(th),
+    ];
+  };
+
   const spec: ShellSpec = {
     outline: [],
     constraints,
@@ -1278,17 +1428,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     // A hanging top is nearly flat; a deep, wide roll reads as a padded pillow.
     depth: hoodie ? 24 : 17,
     roll: 38,
-    profile: (q) => {
-      const body = 1 - 0.25 * Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad)));
-      if (!MARKETING) return body;
-      // A filled-out body is oval in section, not a flat board with rolled edges: the depth eases off
-      // toward the sides so light falls off across the whole front.
-      const across = Math.min(1, Math.abs(q.x) / (W / 2));
-      const oval = body * (1 - 0.38 * across * across);
-      if (inBodyOf(q, true)) return oval;
-      // Sleeves are slimmer tubes than the body; tapering from the armhole keeps the seam continuous.
-      return oval * (1 - 0.25 * smoothstep(0, 110, distToSegs(q.x, q.y, armSegs)));
-    },
+    profile: (q) => 1 - 0.25 * Math.min(1, Math.max(0, (q.y - ad) / (yBot - ad))),
     fold: (q, back) => {
       const inBody = pointInPolygon(q.x, q.y, back ? bodyPolyB : bodyPolyF);
       if (MARKETING) return marketingFold(q, back, inBodyOf(q, back));
@@ -1315,16 +1455,19 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     topW: yBot + 10,
     // Finer mesh so the narrow catalogue drag folds are resolved instead of faceted.
     step: MARKETING ? 7 : undefined,
-    drop: (q) => {
-      // The marketing hem falls in soft waves instead of a ruler-straight edge.
-      const wave = MARKETING && !hemBand ? 3.2 * Math.sin((2 * Math.PI * q.x) / (0.24 * W) + 0.6) * smoothstep(yBot - 120, yBot, q.y) : 0;
-      const d = SHOULDER_DROP * Math.min(Math.max(Math.abs(q.x) - nw, 0), SP.x - nw);
-      if (!d) return wave;
-      // Sleeves hang from the armhole: below the underarm they take its drop instead of fading out,
-      // which keeps the offset continuous across the sleeve seam.
-      const sleeve = q.y < hemY && !pointInPolygon(q.x, q.y, bodyPolyB);
-      return wave + d * (1 - smoothstep(SP.y, ad + 160, sleeve ? Math.min(q.y, ad) : q.y));
-    },
+    drop,
+    core: MARKETING ? (q, back) => {
+      let c = bodyForm(q, back);
+      if (q.y < hemY && Math.abs(q.x) > armX(q.y) && !inBodyOf(q, back)) {
+        // The sleeve tube grows out of the body form over the first 7 cm past the armhole seam.
+        const w = smoothstep(0, 70, distToSegs(q.x, q.y, armSegs));
+        if (w > 0) {
+          const s = sleeveForm(q, back);
+          c = [c[0] + (s[0] - c[0]) * w, c[1] + (s[1] - c[1]) * w, c[2] + (s[2] - c[2]) * w];
+        }
+      }
+      return V(c[0], yBot + 10 - c[1] - drop(q), c[2]);
+    } : undefined,
   };
   const surfaces: MeshPrintSurface[] = [];
   const cloth: ClothPanel[] = [];
@@ -1392,7 +1535,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
   // ---- neckline: rib band (T-shirt) or the rim where the hood is sewn in (hoodie) ----
   addMesh(group, ribBand(openingLoop(spec, neckF, neckB), hoodie ? 0.032 : 0.022, hoodie ? 1.1 : 0.8), mat);
   const depthAt = (q: Point, back: boolean) => shellDepth(spec, q, back);
-  const toWorld = (q: Point, z: number) => shellWorld(spec, q, z);
+  const toWorld = (q: Point, z: number, back: boolean) => shellWorld(spec, q, z, back);
   // Twin-needle cover stitch sits ~2 cm inside the hem, never on the silhouette edge.
   const hemInset = bottom.map((q) => ({ x: q.x * 0.95, y: q.y - 20 }));
   const sleeveInset = endR.map((q) => {
@@ -1400,7 +1543,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     return { x: q.x + dx / len * 20, y: q.y + dy / len * 20 };
   });
   for (const back of [false, true]) {
-    const world = (path: Point[]) => path.map((q) => toWorld(q, (back ? -1 : 1) * (depthAt(q, back) + 0.7)));
+    const world = (path: Point[]) => path.map((q) => toWorld(q, (back ? -1 : 1) * (depthAt(q, back) + 0.7), back));
     for (const path of [hemInset, sleeveInset, mir(sleeveInset), back ? neckB : neckF]) addSewnDetail(group, world(path), mat);
     // Set-in sleeve seams show as a soft ridge only; shoulder seams lie on the silhouette edge.
     for (const path of [armR, mir(armR)]) addSewnDetail(group, world(path), mat, false);
@@ -1411,7 +1554,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const ly = neckB[Math.floor(neckB.length / 2)].y + 12;
     const label = new THREE.PlaneGeometry(0.036, 0.012);
     const lm = addMesh(group, label, new THREE.MeshPhysicalMaterial({ color: 0xf4f1ea, roughness: 0.85 }));
-    lm.position.copy(toWorld({ x: 0, y: ly }, -depthAt({ x: 0, y: ly }, true) + 1.2));
+    lm.position.copy(toWorld({ x: 0, y: ly }, -depthAt({ x: 0, y: ly }, true) + 1.2, true));
     lm.castShadow = false;
   }
 
@@ -1434,12 +1577,12 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const hpos: number[] = [];
     for (const q of hm.pts) {
       const lift = 22 * roundProfile(distToSegs(q.x, q.y, hoodEdge) / 45) * (1 - 0.2 * Math.exp(-((q.x / 8) ** 2)));
-      const v = toWorld(q, -depthAt(q, true) - 3 - lift);
+      const v = toWorld(q, -depthAt(q, true) - 3 - lift, true);
       hpos.push(v.x, v.y, v.z);
     }
     addMesh(group, patchGeometry(hm, hpos, true), mat);
     addSewnDetail(group, hm.pts.filter((q) => Math.abs(q.x) < 0.01).sort((a, b) => a.y - b.y)
-      .map((q) => toWorld(q, -depthAt(q, true) - 25)), mat);
+      .map((q) => toWorld(q, -depthAt(q, true) - 25, true)), mat);
 
     // kangaroo pocket stitched onto the front, open along the slanted edges
     const pw = 360 * k;
@@ -1453,11 +1596,11 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const pm = meshRegion(P, [], 9);
     const ppos: number[] = [];
     for (const q of pm.pts) {
-      const v = toWorld(q, depthAt(q, false) + 1.2 + 2.6 * roundProfile(distToSegs(q.x, q.y, pocketSewn) / 12));
+      const v = toWorld(q, depthAt(q, false) + 1.2 + 2.6 * roundProfile(distToSegs(q.x, q.y, pocketSewn) / 12), false);
       ppos.push(v.x, v.y, v.z);
     }
     addMesh(group, patchGeometry(pm, ppos, false), mat);
-    addSewnDetail(group, [...P, P[0]].map((q) => toWorld(q, depthAt(q, false) + 2)), mat);
+    addSewnDetail(group, [...P, P[0]].map((q) => toWorld(q, depthAt(q, false) + 2, false)), mat);
 
     // drawcords hanging from the hood rim
     const cordMat = new THREE.MeshPhysicalMaterial({ color: 0xf5f5f0, roughness: 0.7, sheen: 1, sheenRoughness: 0.5 });
@@ -1465,7 +1608,7 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     for (const s of [-1, 1]) {
       const pts = [0, 0.35, 0.7, 1].map((f) => {
         const q = { x: s * (32 + f * 8), y: neckDepth - 8 + f * 230 };
-        return toWorld(q, depthAt(q, false) + 4 + (pointInPolygon(q.x, q.y, P) ? 3.8 : 0));
+        return toWorld(q, depthAt(q, false) + 4 + (pointInPolygon(q.x, q.y, P) ? 3.8 : 0), false);
       });
       addMesh(group, new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, 0.0032, 8), cordMat);
       const tip = new THREE.CylinderGeometry(0.0036, 0.0036, 0.022, 10);
@@ -1504,11 +1647,11 @@ function buildTop(group: THREE.Group, p: GarmentParams, mat: THREE.Material, hoo
     const colors = geo.getAttribute('color') as THREE.BufferAttribute;
     for (let i = 0; i < position.count; i++) {
       const nz = normal.getZ(i);
-      // Catalogue shots are modelled by a key high on the left: baking that falloff into the
-      // shading keeps folds and the turning sides readable even under the soft preview lights.
+      // Catalogue shots are modelled by a key high on the left. The round form already turns away
+      // from the lights, so only a gentle share of that falloff is baked in to keep folds readable.
       const shade = MARKETING
         // (vertex colours are linear: square the perceptual falloff or the display curve flattens it)
-        ? THREE.MathUtils.clamp(0.1 + 1.05 * (-0.45 * normal.getX(i) + 0.25 * normal.getY(i) + 0.86 * Math.abs(nz)), 0.5, 1) ** 2.2
+        ? THREE.MathUtils.clamp(0.45 + 0.6 * (-0.3 * normal.getX(i) + 0.2 * normal.getY(i) + 0.85 * Math.abs(nz)), 0.62, 1) ** 2.2
         : Math.max(0.62, 1 - 0.24 * (1 - Math.abs(nz)));
       const ao = Math.min(colors.getX(i), shade);
       colors.setXYZW(i, ao, ao, ao, 1);
@@ -1851,11 +1994,19 @@ export function buildGarmentObject(params: GarmentParams, materialId: string, op
   const group = new THREE.Group();
   outer.add(group);
   const marketing = options.presentation === 'marketing';
+  if (marketing && /cotton|jersey|fleece|knit/i.test(mat.name)) applyHeather(mat);
+  // Inside faces, seen through the neck, sleeves and hem, sit in the shade of the garment itself.
+  mat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <color_fragment>',
+      '#include <color_fragment>\n\tif (!gl_FrontFacing) diffuseColor.rgb *= 0.55;',
+    );
+  };
   FOLD_K = Math.max(0, Math.min(3, options.wrinkles ?? 1)) * (marketing ? 0.9 : 1);
   MARKETING = marketing;
-  // Ghost-mannequin fullness: a body is about a third as deep as it is wide; legs, skirts and bags less.
-  const volume: Partial<Record<GarmentId, number>> = { tshirt: 4.2, hoodie: 3.6, trousers: 2.4, skirt: 3.2, tote: 2.6 };
-  VOLUME_K = marketing ? volume[p.garment] ?? 3 : 1;
+  // Ghost-mannequin fullness for legs, skirts and bags; tops are wrapped onto their own body form.
+  const volume: Partial<Record<GarmentId, number>> = { trousers: 2.4, skirt: 3.2, tote: 2.6 };
+  VOLUME_K = marketing ? volume[p.garment] ?? 1 : 1;
   let surfaces: MeshPrintSurface[] = [];
   switch (p.garment) {
     case 'hoodie':

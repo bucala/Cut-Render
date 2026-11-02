@@ -51,16 +51,24 @@ tvoria skutočné prekážky pred svetlom, nie premietnutý obrázok.
 ## Zobrazenie: realistické a marketingové
 
 - **Realistické**: odev visí pod vlastnou váhou, stena má farbu prostredia.
-- **Marketingové**: odev má plný objem ako na fotke s neviditeľnou figurínou
-  (tričko 4,2×, mikina 3,6×, sukňa 3,2×, taška 2,6×, nohavice 2,4× hlbšie vrstvy),
-  látka sa gravitačne nesimuluje a záhyby majú vlastný katalógový vzor: ťahové záhyby
+- **Marketingové**: odev má plný objem ako na fotke s neviditeľnou figurínou a látka sa
+  gravitačne nesimuluje. Tričko a mikina sa obalia okolo tvaru tela: každý riadok strihu
+  si zachová svoju šírku ako dĺžku oblúka, takže obrys sa pri plnení zúži (namiesto vankúša
+  širokého ako plochý strih). Trup má eliptický prierez (hĺbka polovica šírky, mikina 0,55),
+  ktorý sa pri ramenách zatvára k ramennému švu nad ramienkom. Rukávy sú rúrky zavesené
+  z hornej hrany rukáva; pri prišití k telu sú ploché (pomer 0,45), k lemu sa zaobľujú (0,75)
+  a odstávajú šikmo nadol (krátke 50°, dlhé 62°). Sukňa (3,2×), taška (2,6×) a nohavice
+  (2,4×) majú len hlbšie vrstvy. Záhyby majú vlastný katalógový vzor: ťahové záhyby
   od podpazušia k hrudi, mäkké vlny a zvislé riasenie pri leme (lem je zvlnený aj v obryse,
-  rebrový lem mikiny ostáva napnutý) a záhyby v podpazuší rukávov. Telo má oválny prierez,
-  rukávy sú o štvrtinu tenšie a odstávajú šikmo nadol (krátke 44°, dlhé 56°).
-  Do vertexových farieb sa zapečie tieň od hlavného svetla zľava zhora, takže boky a záhyby
-  ostanú čitateľné aj v mäkkom náhľade. Stena má stredný, menej sýty odtieň
+  rebrový lem mikiny ostáva napnutý) a mierne riasenie v podpazuší rukávov.
+  Do vertexových farieb sa zapečie mierny tieň od hlavného svetla zľava zhora. Úplet dostane
+  jemný melír (svetlé a tmavšie vlákna 1 – 8 mm), aby bol viditeľný aj v náhľade.
+  Stena má stredný, menej sýty odtieň
   farby odevu, za odevom ju rozjasňuje mäkký kužeľ svetla a listy sú väčšie a rozmazanejšie.
   Svetlo je kontrastnejšie (menej výplne, silnejší hlavný zdroj).
+
+V oboch režimoch je vnútorná strana látky (viditeľná cez výstrih, rukávy a lem) v náhľade
+tmavšia, ako keby ju tienil samotný odev. Path tracer počíta toto zatienenie sám.
 
 Text v aplikácii sa ťahaním myši neoznačuje. Označiť sa dá iba obsah polí a editovateľný text.
 
